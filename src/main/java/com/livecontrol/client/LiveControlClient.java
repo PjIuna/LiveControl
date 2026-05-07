@@ -8,11 +8,17 @@ import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.entity.Entity;
+import net.minecraft.entity.LivingEntity;
 import net.minecraft.entity.damage.DamageSource;
+import net.minecraft.entity.mob.HostileEntity;
 import net.minecraft.text.Text;
+import net.minecraft.util.Hand;
 import net.minecraft.util.math.Vec3d;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import java.util.Comparator;
+import java.util.List;
 
 public final class LiveControlClient implements ClientModInitializer {
     public static final String MOD_ID = "livecontrol";
@@ -21,20 +27,25 @@ public final class LiveControlClient implements ClientModInitializer {
     private static final YoutubeChatBridge YOUTUBE_CHAT_BRIDGE = new YoutubeChatBridge();
     private static final TwitchChatBridge TWITCH_CHAT_BRIDGE = new TwitchChatBridge();
     private static final KickChatBridge KICK_CHAT_BRIDGE = new KickChatBridge();
-    private static final int ATTACK_ESCAPE_TICKS = 60;
     private static final int CHAT_BRIDGE_WATCHDOG_INTERVAL_TICKS = 20 * 20;
+    private static final long LIVE_CHAT_COMMAND_COOLDOWN_MILLIS = 30_000L;
+    private static final double ATTACK_CANCEL_DISTANCE = 24.0D;
+    private static final double ATTACK_REACH_DISTANCE = 3.0D;
+    private static final double MOB_RUN_START_DISTANCE = 8.0D;
+    private static final double MOB_RUN_STOP_DISTANCE = 12.0D;
     private static LiveControlConfig config;
     private static boolean chatCommandsEnabled = true;
     private static int previousHurtTime = 0;
-    private static int escapeTicks = 0;
-    private static double escapeYaw = 0.0D;
     private static int chatBridgeWatchdogTicks = 0;
+    private static long lastLiveChatCommandTime = 0L;
+    private static Entity attackTarget;
+    private static boolean runningFromMobs = false;
 
     @Override
     public void onInitializeClient() {
         config = LiveControlConfig.load();
         registerCommands();
-        ClientTickEvents.START_CLIENT_TICK.register(LiveControlClient::tickAttackEscape);
+        ClientTickEvents.START_CLIENT_TICK.register(LiveControlClient::tickCombatAutomation);
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             LiveControlBossBar.tick();
             tickChatBridgeWatchdog();
@@ -78,6 +89,25 @@ public final class LiveControlClient implements ClientModInitializer {
         return chatCommandsEnabled;
     }
 
+    public static void runLiveChatCommand(LiveControlCommands command) {
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (client.player == null || client.getNetworkHandler() == null || !chatCommandsEnabled) {
+            return;
+        }
+
+        long now = System.currentTimeMillis();
+        long nextAllowedTime = lastLiveChatCommandTime + LIVE_CHAT_COMMAND_COOLDOWN_MILLIS;
+        if (now < nextAllowedTime) {
+            long remainingSeconds = Math.max(1L, (nextAllowedTime - now + 999L) / 1000L);
+            client.player.sendMessage(Text.literal("LiveControl command cooldown: wait " + remainingSeconds + "s."), true);
+            return;
+        }
+
+        lastLiveChatCommandTime = now;
+        client.getNetworkHandler().sendChatMessage(command.chatCommand());
+        client.player.sendMessage(Text.literal("LiveControl ran " + command.chatCommand()), true);
+    }
+
     private static void registerCommands() {
         ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) -> {
             dispatcher.register(ClientCommandManager.literal("afk")
@@ -108,11 +138,12 @@ public final class LiveControlClient implements ClientModInitializer {
         sendMinecraftChatMessage("#stop");
     }
 
-    private static void tickAttackEscape(MinecraftClient client) {
+    private static void tickCombatAutomation(MinecraftClient client) {
         ClientPlayerEntity player = client.player;
         if (player == null) {
             previousHurtTime = 0;
-            escapeTicks = 0;
+            attackTarget = null;
+            runningFromMobs = false;
             return;
         }
 
@@ -120,15 +151,19 @@ public final class LiveControlClient implements ClientModInitializer {
             Entity attacker = getAttacker(player);
             if (attacker != null) {
                 sendMinecraftChatMessage("#stop");
-                startEscape(player, attacker);
+                attackTarget = attacker;
+                runningFromMobs = false;
             }
         }
         previousHurtTime = player.hurtTime;
 
-        if (escapeTicks > 0) {
-            runAway(client, player);
-            escapeTicks--;
+        if (attackTarget != null) {
+            if (tickAttackTarget(client, player)) {
+                return;
+            }
         }
+
+        tickMobEscape(client, player);
     }
 
     private static Entity getAttacker(ClientPlayerEntity player) {
@@ -139,21 +174,95 @@ public final class LiveControlClient implements ClientModInitializer {
         return player.getAttacker();
     }
 
-    private static void startEscape(ClientPlayerEntity player, Entity attacker) {
-        Vec3d away = player.getPos().subtract(attacker.getPos());
+    private static boolean tickAttackTarget(MinecraftClient client, ClientPlayerEntity player) {
+        if (!isValidAttackTarget(player, attackTarget)) {
+            attackTarget = null;
+            stopMovement(client, player);
+            return false;
+        }
+
+        double squaredDistance = player.squaredDistanceTo(attackTarget);
+        if (squaredDistance > ATTACK_CANCEL_DISTANCE * ATTACK_CANCEL_DISTANCE) {
+            attackTarget = null;
+            stopMovement(client, player);
+            return false;
+        }
+
+        faceEntity(player, attackTarget);
+        if (squaredDistance > ATTACK_REACH_DISTANCE * ATTACK_REACH_DISTANCE) {
+            moveForward(client, player, true);
+        } else {
+            stopMovement(client, player);
+            if (client.interactionManager != null && player.getAttackCooldownProgress(0.0F) >= 1.0F) {
+                client.interactionManager.attackEntity(player, attackTarget);
+                player.swingHand(Hand.MAIN_HAND);
+            }
+        }
+        return true;
+    }
+
+    private static boolean isValidAttackTarget(ClientPlayerEntity player, Entity target) {
+        if (!(target instanceof LivingEntity livingTarget)) {
+            return false;
+        }
+        return target.isAlive()
+                && !target.isRemoved()
+                && livingTarget.getHealth() > 0.0F
+                && target.getWorld() == player.getWorld();
+    }
+
+    private static void tickMobEscape(MinecraftClient client, ClientPlayerEntity player) {
+        HostileEntity nearestMob = nearestHostileMob(player, runningFromMobs ? MOB_RUN_STOP_DISTANCE : MOB_RUN_START_DISTANCE);
+        if (nearestMob == null) {
+            if (runningFromMobs) {
+                runningFromMobs = false;
+                stopMovement(client, player);
+            }
+            return;
+        }
+
+        runningFromMobs = true;
+        runAwayFrom(client, player, nearestMob);
+    }
+
+    private static HostileEntity nearestHostileMob(ClientPlayerEntity player, double distance) {
+        double squaredDistance = distance * distance;
+        List<HostileEntity> mobs = player.getWorld().getEntitiesByClass(
+                HostileEntity.class,
+                player.getBoundingBox().expand(distance),
+                mob -> mob.isAlive() && !mob.isRemoved() && player.squaredDistanceTo(mob) <= squaredDistance
+        );
+        return mobs.stream()
+                .min(Comparator.comparingDouble(player::squaredDistanceTo))
+                .orElse(null);
+    }
+
+    private static void runAwayFrom(MinecraftClient client, ClientPlayerEntity player, Entity threat) {
+        Vec3d away = player.getPos().subtract(threat.getPos());
         if (away.horizontalLengthSquared() < 1.0E-6D) {
             away = player.getRotationVector();
         }
 
-        escapeYaw = Math.toDegrees(Math.atan2(away.z, away.x)) - 90.0D;
-        escapeTicks = ATTACK_ESCAPE_TICKS;
+        setYawFromVector(player, away);
+        moveForward(client, player, true);
+        Vec3d forward = Vec3d.fromPolar(0.0F, player.getYaw()).normalize().multiply(0.18D);
+        Vec3d velocity = player.getVelocity();
+        player.setVelocity(forward.x, velocity.y, forward.z);
     }
 
-    private static void runAway(MinecraftClient client, ClientPlayerEntity player) {
-        player.setYaw((float) escapeYaw);
-        player.setSprinting(true);
+    private static void faceEntity(ClientPlayerEntity player, Entity entity) {
+        Vec3d toward = entity.getPos().subtract(player.getPos());
+        setYawFromVector(player, toward);
+    }
+
+    private static void setYawFromVector(ClientPlayerEntity player, Vec3d vector) {
+        player.setYaw((float) (Math.toDegrees(Math.atan2(vector.z, vector.x)) - 90.0D));
+    }
+
+    private static void moveForward(MinecraftClient client, ClientPlayerEntity player, boolean sprinting) {
+        player.setSprinting(sprinting);
         client.options.forwardKey.setPressed(true);
-        client.options.sprintKey.setPressed(true);
+        client.options.sprintKey.setPressed(sprinting);
         client.options.backKey.setPressed(false);
         client.options.leftKey.setPressed(false);
         client.options.rightKey.setPressed(false);
@@ -163,9 +272,14 @@ public final class LiveControlClient implements ClientModInitializer {
         player.input.pressingRight = false;
         player.input.movementForward = 1.0F;
         player.input.movementSideways = 0.0F;
-        Vec3d forward = Vec3d.fromPolar(0.0F, (float) escapeYaw).normalize().multiply(0.18D);
-        Vec3d velocity = player.getVelocity();
-        player.setVelocity(forward.x, velocity.y, forward.z);
+    }
+
+    private static void stopMovement(MinecraftClient client, ClientPlayerEntity player) {
+        client.options.forwardKey.setPressed(false);
+        client.options.sprintKey.setPressed(false);
+        player.setSprinting(false);
+        player.input.pressingForward = false;
+        player.input.movementForward = 0.0F;
     }
 
     private static void sendMinecraftChatMessage(String message) {

@@ -5,7 +5,6 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import net.minecraft.client.MinecraftClient;
-import net.minecraft.text.Text;
 
 import java.io.IOException;
 import java.net.URI;
@@ -182,16 +181,7 @@ public final class KickChatBridge {
 
         LiveControlCommands.fromChatMessage(message).ifPresent(command -> {
             MinecraftClient client = MinecraftClient.getInstance();
-            client.execute(() -> sendMinecraftChatMessage(client, command));
+            client.execute(() -> LiveControlClient.runLiveChatCommand(command));
         });
-    }
-
-    private static void sendMinecraftChatMessage(MinecraftClient client, LiveControlCommands command) {
-        if (client.player == null || client.getNetworkHandler() == null) {
-            return;
-        }
-
-        client.getNetworkHandler().sendChatMessage(command.chatCommand());
-        client.player.sendMessage(Text.literal("LiveControl ran " + command.chatCommand()), true);
     }
 }
