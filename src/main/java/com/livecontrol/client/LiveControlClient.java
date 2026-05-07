@@ -10,11 +10,29 @@ import net.minecraft.client.gui.screen.DeathScreen;
 import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.LivingEntity;
+import net.minecraft.entity.attribute.EntityAttributeModifier;
+import net.minecraft.entity.attribute.EntityAttributes;
 import net.minecraft.entity.damage.DamageSource;
 import net.minecraft.entity.mob.HostileEntity;
+import net.minecraft.item.Item;
+import net.minecraft.item.ItemStack;
+import net.minecraft.item.Items;
+import net.minecraft.item.PickaxeItem;
+import net.minecraft.recipe.Recipe;
+import net.minecraft.network.packet.c2s.play.UpdateSelectedSlotC2SPacket;
+import net.minecraft.recipe.RecipeType;
+import net.minecraft.registry.tag.ItemTags;
+import net.minecraft.screen.CraftingScreenHandler;
+import net.minecraft.screen.PlayerScreenHandler;
+import net.minecraft.screen.ScreenHandler;
+import net.minecraft.screen.slot.SlotActionType;
 import net.minecraft.text.Text;
 import net.minecraft.util.Hand;
+import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.hit.BlockHitResult;
+import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
+import net.minecraft.block.Blocks;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -42,6 +60,8 @@ public final class LiveControlClient implements ClientModInitializer {
     private static final int OBSTACLE_AVOIDANCE_TICKS = 12;
     private static final int CORNERED_ATTACK_TICKS = 10;
     private static final double CAMERA_FOLLOW_MOVEMENT_THRESHOLD = 1.0E-4D;
+    private static final int PICKAXE_AUTOMATION_TIMEOUT_TICKS = 20 * 20;
+    private static final int PICKAXE_AUTOMATION_RETRY_TICKS = 5;
     private static LiveControlConfig config;
     private static boolean chatCommandsEnabled = true;
     private static boolean cameraFollowsPlayerMovement = false;
@@ -57,6 +77,12 @@ public final class LiveControlClient implements ClientModInitializer {
     private static int corneredTicks = 0;
     private static Vec3d previousCameraFollowPosition;
     private static Boolean pendingAutoJumpEnabled;
+    private static LiveControlCommands lastExecutedLiveChatCommand;
+    private static boolean rerunLastCommandAfterRespawn;
+    private static boolean wasDead;
+    private static boolean pickaxeAutomationActive;
+    private static int pickaxeAutomationTicksRemaining;
+    private static int pickaxeAutomationRetryTicks;
 
     @Override
     public void onInitializeClient() {
@@ -69,6 +95,7 @@ public final class LiveControlClient implements ClientModInitializer {
             tickAutoRespawn(client);
             tickCameraFollowMovement(client);
             tickQueuedLiveChatCommands(client);
+            tickPickaxeAutomation(client);
             LiveControlBossBar.tick();
             tickChatBridgeWatchdog();
         });
@@ -126,8 +153,20 @@ public final class LiveControlClient implements ClientModInitializer {
         }
 
         lastLiveChatCommandTime = now;
+        executeLiveChatCommand(client, command, true);
+    }
+
+    private static void executeLiveChatCommand(MinecraftClient client, LiveControlCommands command, boolean rememberCommand) {
+        if (command == LiveControlCommands.PICKAXE) {
+            startPickaxeAutomation(client, rememberCommand);
+            return;
+        }
+
         String[] commandMessages = command.chatCommands();
         queueLiveChatCommands(commandMessages);
+        if (rememberCommand && containsNonStopCommand(commandMessages)) {
+            lastExecutedLiveChatCommand = command;
+        }
         String feedback = commandMessages.length == 1
                 ? commandMessages[0]
                 : command.displayName() + " sequence (" + commandMessages.length + " commands)";
@@ -170,6 +209,7 @@ public final class LiveControlClient implements ClientModInitializer {
         setAutoJumpEnabled(false);
         LiveControlBossBar.setVisible(false);
         cancelQueuedLiveChatCommands();
+        rerunLastCommandAfterRespawn = false;
         sendMinecraftChatMessage("#stop");
     }
 
@@ -204,15 +244,28 @@ public final class LiveControlClient implements ClientModInitializer {
     private static void tickAutoRespawn(MinecraftClient client) {
         ClientPlayerEntity player = client.player;
         if (player == null) {
+            wasDead = false;
             return;
         }
 
-        if (!player.isAlive() || player.getHealth() <= 0.0F) {
+        boolean dead = !player.isAlive() || player.getHealth() <= 0.0F;
+        if (dead) {
+            if (!wasDead && chatCommandsEnabled && lastExecutedLiveChatCommand != null) {
+                rerunLastCommandAfterRespawn = true;
+            }
+            wasDead = true;
             player.requestRespawn();
             if (client.currentScreen instanceof DeathScreen) {
                 client.setScreen(null);
             }
+            return;
         }
+
+        if (wasDead && rerunLastCommandAfterRespawn && chatCommandsEnabled && lastExecutedLiveChatCommand != null) {
+            rerunLastCommandAfterRespawn = false;
+            executeLiveChatCommand(client, lastExecutedLiveChatCommand, false);
+        }
+        wasDead = false;
     }
 
     private static void tickCameraFollowMovement(MinecraftClient client) {
@@ -254,6 +307,7 @@ public final class LiveControlClient implements ClientModInitializer {
             return false;
         }
 
+        equipBestDamageTool(player);
         faceEntity(player, attackTarget);
         if (squaredDistance > ATTACK_REACH_DISTANCE * ATTACK_REACH_DISTANCE) {
             moveForward(client, player, true);
@@ -393,6 +447,47 @@ public final class LiveControlClient implements ClientModInitializer {
         player.input.movementSideways = 0.0F;
     }
 
+
+    private static void equipBestDamageTool(ClientPlayerEntity player) {
+        int bestSlot = player.getInventory().selectedSlot;
+        double bestDamage = attackDamage(player.getInventory().getStack(bestSlot));
+        for (int slot = 0; slot < 9; slot++) {
+            ItemStack stack = player.getInventory().getStack(slot);
+            if (stack.isEmpty()) {
+                continue;
+            }
+
+            double damage = attackDamage(stack);
+            if (damage > bestDamage) {
+                bestDamage = damage;
+                bestSlot = slot;
+            }
+        }
+
+        if (bestSlot != player.getInventory().selectedSlot) {
+            player.getInventory().selectedSlot = bestSlot;
+            if (player.networkHandler != null) {
+                player.networkHandler.sendPacket(new UpdateSelectedSlotC2SPacket(bestSlot));
+            }
+        }
+    }
+
+    private static double attackDamage(ItemStack stack) {
+        if (stack.isEmpty()) {
+            return 0.0D;
+        }
+
+        double damage = 1.0D;
+        for (EntityAttributeModifier modifier : stack.getAttributeModifiers(net.minecraft.entity.EquipmentSlot.MAINHAND).get(EntityAttributes.GENERIC_ATTACK_DAMAGE)) {
+            damage = switch (modifier.getOperation()) {
+                case ADDITION -> damage + modifier.getValue();
+                case MULTIPLY_BASE -> damage + 1.0D * modifier.getValue();
+                case MULTIPLY_TOTAL -> damage * (1.0D + modifier.getValue());
+            };
+        }
+        return damage;
+    }
+
     private static void beginAutoFight(Entity target) {
         cancelQueuedLiveChatCommands();
         sendMinecraftChatMessage("#stop");
@@ -414,6 +509,228 @@ public final class LiveControlClient implements ClientModInitializer {
 
         client.options.getAutoJump().setValue(pendingAutoJumpEnabled);
         pendingAutoJumpEnabled = null;
+    }
+
+
+    private static void startPickaxeAutomation(MinecraftClient client, boolean rememberCommand) {
+        cancelQueuedLiveChatCommands();
+        pickaxeAutomationActive = true;
+        pickaxeAutomationTicksRemaining = PICKAXE_AUTOMATION_TIMEOUT_TICKS;
+        pickaxeAutomationRetryTicks = 0;
+        if (rememberCommand) {
+            lastExecutedLiveChatCommand = LiveControlCommands.PICKAXE;
+        }
+        client.player.sendMessage(Text.literal("LiveControl is crafting a wooden pickaxe with the mod."), true);
+    }
+
+    private static void tickPickaxeAutomation(MinecraftClient client) {
+        if (!pickaxeAutomationActive || client.player == null || client.interactionManager == null || client.world == null) {
+            return;
+        }
+
+        ClientPlayerEntity player = client.player;
+        if (hasItem(player, Items.WOODEN_PICKAXE) || hasPickaxe(player)) {
+            pickaxeAutomationActive = false;
+            player.sendMessage(Text.literal("LiveControl pickaxe ready."), true);
+            return;
+        }
+
+        if (pickaxeAutomationTicksRemaining-- <= 0) {
+            pickaxeAutomationActive = false;
+            player.sendMessage(Text.literal("LiveControl could not craft a pickaxe. Add wood or open/place a crafting table nearby."), true);
+            return;
+        }
+
+        if (pickaxeAutomationRetryTicks-- > 0) {
+            return;
+        }
+        pickaxeAutomationRetryTicks = PICKAXE_AUTOMATION_RETRY_TICKS;
+
+        if (player.currentScreenHandler instanceof CraftingScreenHandler) {
+            craftWoodenPickaxeAtTable(client, player);
+            return;
+        }
+
+        if (openNearbyCraftingTable(client, player)) {
+            return;
+        }
+
+        if (!hasItem(player, Items.CRAFTING_TABLE)) {
+            craftInventoryPrerequisites(client, player);
+            return;
+        }
+
+        placeCraftingTable(client, player);
+    }
+
+    private static void craftWoodenPickaxeAtTable(MinecraftClient client, ClientPlayerEntity player) {
+        if (countTagged(player, ItemTags.PLANKS) < 3) {
+            tryCraftTaggedOutput(client, player.currentScreenHandler, ItemTags.PLANKS);
+            return;
+        }
+        if (countItem(player, Items.STICK) < 2) {
+            tryCraftItem(client, player.currentScreenHandler, Items.STICK);
+            return;
+        }
+        tryCraftItem(client, player.currentScreenHandler, Items.WOODEN_PICKAXE);
+    }
+
+    private static void craftInventoryPrerequisites(MinecraftClient client, ClientPlayerEntity player) {
+        ScreenHandler handler = player.currentScreenHandler;
+        if (!(handler instanceof PlayerScreenHandler)) {
+            player.sendMessage(Text.literal("LiveControl needs the normal inventory or a crafting table to craft a pickaxe."), true);
+            return;
+        }
+
+        if (countTagged(player, ItemTags.PLANKS) < 4) {
+            tryCraftTaggedOutput(client, handler, ItemTags.PLANKS);
+            return;
+        }
+        tryCraftItem(client, handler, Items.CRAFTING_TABLE);
+    }
+
+    private static boolean tryCraftItem(MinecraftClient client, ScreenHandler handler, Item item) {
+        return tryCraftRecipe(client, handler, recipe -> recipe.getOutput(client.world.getRegistryManager()).isOf(item));
+    }
+
+    private static boolean tryCraftTaggedOutput(MinecraftClient client, ScreenHandler handler, net.minecraft.registry.tag.TagKey<Item> tag) {
+        return tryCraftRecipe(client, handler, recipe -> recipe.getOutput(client.world.getRegistryManager()).isIn(tag));
+    }
+
+    private static boolean tryCraftRecipe(MinecraftClient client, ScreenHandler handler, java.util.function.Predicate<Recipe<?>> predicate) {
+        if (client.interactionManager == null || client.player == null || client.getNetworkHandler() == null || client.world == null) {
+            return false;
+        }
+
+        for (Recipe<?> recipe : client.getNetworkHandler().getRecipeManager().listAllOfType(RecipeType.CRAFTING)) {
+            if (!predicate.test(recipe)) {
+                continue;
+            }
+            client.interactionManager.clickRecipe(handler.syncId, recipe, false);
+            client.interactionManager.clickSlot(handler.syncId, 0, 0, SlotActionType.QUICK_MOVE, client.player);
+            return true;
+        }
+        return false;
+    }
+
+    private static boolean openNearbyCraftingTable(MinecraftClient client, ClientPlayerEntity player) {
+        BlockPos playerPos = player.getBlockPos();
+        for (BlockPos pos : BlockPos.iterate(playerPos.add(-4, -2, -4), playerPos.add(4, 2, 4))) {
+            if (!client.world.getBlockState(pos).isOf(Blocks.CRAFTING_TABLE)) {
+                continue;
+            }
+            BlockHitResult hit = new BlockHitResult(Vec3d.ofCenter(pos), Direction.UP, pos.toImmutable(), false);
+            client.interactionManager.interactBlock(player, Hand.MAIN_HAND, hit);
+            return true;
+        }
+        return false;
+    }
+
+    private static void placeCraftingTable(MinecraftClient client, ClientPlayerEntity player) {
+        int tableSlot = findHotbarItem(player, Items.CRAFTING_TABLE);
+        if (tableSlot < 0) {
+            tableSlot = moveItemToHotbar(client, player, Items.CRAFTING_TABLE);
+        }
+        if (tableSlot < 0) {
+            return;
+        }
+
+        int previousSlot = player.getInventory().selectedSlot;
+        player.getInventory().selectedSlot = tableSlot;
+        player.networkHandler.sendPacket(new UpdateSelectedSlotC2SPacket(tableSlot));
+        BlockPos support = player.getBlockPos().down();
+        BlockPos placePos = support.up();
+        if (!client.world.getBlockState(placePos).isAir()) {
+            support = player.getBlockPos().offset(player.getHorizontalFacing()).down();
+        }
+        BlockHitResult hit = new BlockHitResult(Vec3d.ofCenter(support).add(0.0D, 0.5D, 0.0D), Direction.UP, support, false);
+        client.interactionManager.interactBlock(player, Hand.MAIN_HAND, hit);
+        player.getInventory().selectedSlot = previousSlot;
+        player.networkHandler.sendPacket(new UpdateSelectedSlotC2SPacket(previousSlot));
+    }
+
+    private static int moveItemToHotbar(MinecraftClient client, ClientPlayerEntity player, Item item) {
+        int inventorySlot = findInventoryItem(player, item);
+        if (inventorySlot < 0 || client.interactionManager == null) {
+            return -1;
+        }
+
+        int hotbarSlot = firstEmptyHotbarSlot(player);
+        if (hotbarSlot < 0) {
+            hotbarSlot = player.getInventory().selectedSlot;
+        }
+        client.interactionManager.clickSlot(player.currentScreenHandler.syncId, inventorySlotToScreenSlot(inventorySlot), hotbarSlot, SlotActionType.SWAP, player);
+        return hotbarSlot;
+    }
+
+    private static int inventorySlotToScreenSlot(int inventorySlot) {
+        return inventorySlot < 9 ? 36 + inventorySlot : inventorySlot;
+    }
+
+    private static int findInventoryItem(ClientPlayerEntity player, Item item) {
+        for (int slot = 0; slot < player.getInventory().size(); slot++) {
+            if (player.getInventory().getStack(slot).isOf(item)) {
+                return slot;
+            }
+        }
+        return -1;
+    }
+
+    private static int firstEmptyHotbarSlot(ClientPlayerEntity player) {
+        for (int slot = 0; slot < 9; slot++) {
+            if (player.getInventory().getStack(slot).isEmpty()) {
+                return slot;
+            }
+        }
+        return -1;
+    }
+
+    private static boolean hasPickaxe(ClientPlayerEntity player) {
+        for (int slot = 0; slot < player.getInventory().size(); slot++) {
+            if (player.getInventory().getStack(slot).getItem() instanceof PickaxeItem) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean hasItem(ClientPlayerEntity player, Item item) {
+        return countItem(player, item) > 0;
+    }
+
+    private static int countItem(ClientPlayerEntity player, Item item) {
+        int count = 0;
+        for (int slot = 0; slot < player.getInventory().size(); slot++) {
+            ItemStack stack = player.getInventory().getStack(slot);
+            if (stack.isOf(item)) {
+                count += stack.getCount();
+            }
+        }
+        return count;
+    }
+
+    private static int countTagged(ClientPlayerEntity player, net.minecraft.registry.tag.TagKey<Item> tag) {
+        int count = 0;
+        for (int slot = 0; slot < player.getInventory().size(); slot++) {
+            ItemStack stack = player.getInventory().getStack(slot);
+            if (stack.isIn(tag)) {
+                count += stack.getCount();
+            }
+        }
+        return count;
+    }
+
+    private static int findHotbarItem(ClientPlayerEntity player, Item item) {
+        for (int slot = 0; slot < 9; slot++) {
+            if (player.getInventory().getStack(slot).isOf(item)) {
+                return slot;
+            }
+        }
+        return -1;
+    }
+
+    private static boolean containsNonStopCommand(String[] messages) {
+        return Arrays.stream(messages).anyMatch(message -> !"#stop".equalsIgnoreCase(message.trim()));
     }
 
     private static void tickQueuedLiveChatCommands(MinecraftClient client) {
