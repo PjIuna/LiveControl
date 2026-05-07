@@ -17,8 +17,11 @@ import net.minecraft.util.math.Vec3d;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayDeque;
+import java.util.Arrays;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Queue;
 
 public final class LiveControlClient implements ClientModInitializer {
     public static final String MOD_ID = "livecontrol";
@@ -33,6 +36,10 @@ public final class LiveControlClient implements ClientModInitializer {
     private static final double ATTACK_REACH_DISTANCE = 3.0D;
     private static final double MOB_RUN_START_DISTANCE = 8.0D;
     private static final double MOB_RUN_STOP_DISTANCE = 12.0D;
+    private static final double MOB_CORNERED_ATTACK_DISTANCE = 4.5D;
+    private static final int COMMAND_SEQUENCE_DELAY_TICKS = 25;
+    private static final int OBSTACLE_AVOIDANCE_TICKS = 12;
+    private static final int CORNERED_ATTACK_TICKS = 10;
     private static LiveControlConfig config;
     private static boolean chatCommandsEnabled = true;
     private static int previousHurtTime = 0;
@@ -40,13 +47,20 @@ public final class LiveControlClient implements ClientModInitializer {
     private static long lastLiveChatCommandTime = 0L;
     private static Entity attackTarget;
     private static boolean runningFromMobs = false;
+    private static final Queue<String> queuedLiveChatCommands = new ArrayDeque<>();
+    private static int queuedLiveChatCommandTicks = 0;
+    private static int obstacleAvoidanceTicks = 0;
+    private static int obstacleAvoidanceDirection = 1;
+    private static int corneredTicks = 0;
 
     @Override
     public void onInitializeClient() {
         config = LiveControlConfig.load();
         registerCommands();
+        setAutoJumpEnabled(chatCommandsEnabled);
         ClientTickEvents.START_CLIENT_TICK.register(LiveControlClient::tickCombatAutomation);
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
+            tickQueuedLiveChatCommands(client);
             LiveControlBossBar.tick();
             tickChatBridgeWatchdog();
         });
@@ -104,8 +118,12 @@ public final class LiveControlClient implements ClientModInitializer {
         }
 
         lastLiveChatCommandTime = now;
-        client.getNetworkHandler().sendChatMessage(command.chatCommand());
-        client.player.sendMessage(Text.literal("LiveControl ran " + command.chatCommand()), true);
+        String[] commandMessages = command.chatCommands();
+        queueLiveChatCommands(commandMessages);
+        String feedback = commandMessages.length == 1
+                ? commandMessages[0]
+                : command.displayName() + " sequence (" + commandMessages.length + " commands)";
+        client.player.sendMessage(Text.literal("LiveControl ran " + feedback), true);
     }
 
     private static void registerCommands() {
@@ -114,6 +132,7 @@ public final class LiveControlClient implements ClientModInitializer {
                     .executes(context -> {
                         boolean visible = !LiveControlBossBar.isVisible();
                         chatCommandsEnabled = visible;
+                        setAutoJumpEnabled(visible);
                         LiveControlBossBar.setVisible(visible);
                         context.getSource().sendFeedback(Text.literal(
                                 visible
@@ -134,7 +153,9 @@ public final class LiveControlClient implements ClientModInitializer {
 
     private static void goBack() {
         chatCommandsEnabled = false;
+        setAutoJumpEnabled(false);
         LiveControlBossBar.setVisible(false);
+        cancelQueuedLiveChatCommands();
         sendMinecraftChatMessage("#stop");
     }
 
@@ -144,15 +165,15 @@ public final class LiveControlClient implements ClientModInitializer {
             previousHurtTime = 0;
             attackTarget = null;
             runningFromMobs = false;
+            obstacleAvoidanceTicks = 0;
+            corneredTicks = 0;
             return;
         }
 
         if (player.hurtTime > previousHurtTime) {
             Entity attacker = getAttacker(player);
             if (attacker != null) {
-                sendMinecraftChatMessage("#stop");
-                attackTarget = attacker;
-                runningFromMobs = false;
+                beginAutoFight(attacker);
             }
         }
         previousHurtTime = player.hurtTime;
@@ -216,12 +237,18 @@ public final class LiveControlClient implements ClientModInitializer {
         if (nearestMob == null) {
             if (runningFromMobs) {
                 runningFromMobs = false;
+                obstacleAvoidanceTicks = 0;
+                corneredTicks = 0;
                 stopMovement(client, player);
             }
             return;
         }
 
         runningFromMobs = true;
+        if (isCorneredByMob(player, nearestMob)) {
+            beginAutoFight(nearestMob);
+            return;
+        }
         runAwayFrom(client, player, nearestMob);
     }
 
@@ -243,11 +270,43 @@ public final class LiveControlClient implements ClientModInitializer {
             away = player.getRotationVector();
         }
 
-        setYawFromVector(player, away);
+        Vec3d escape = away;
+        if (player.horizontalCollision || obstacleAvoidanceTicks > 0) {
+            if (obstacleAvoidanceTicks <= 0) {
+                obstacleAvoidanceDirection = -obstacleAvoidanceDirection;
+                obstacleAvoidanceTicks = OBSTACLE_AVOIDANCE_TICKS;
+            } else {
+                obstacleAvoidanceTicks--;
+            }
+            escape = rotateHorizontal(away, obstacleAvoidanceDirection * 55.0D);
+        }
+
+        setYawFromVector(player, escape);
         moveForward(client, player, true);
         Vec3d forward = Vec3d.fromPolar(0.0F, player.getYaw()).normalize().multiply(0.18D);
         Vec3d velocity = player.getVelocity();
         player.setVelocity(forward.x, velocity.y, forward.z);
+    }
+
+    private static boolean isCorneredByMob(ClientPlayerEntity player, Entity threat) {
+        if (player.squaredDistanceTo(threat) > MOB_CORNERED_ATTACK_DISTANCE * MOB_CORNERED_ATTACK_DISTANCE) {
+            corneredTicks = 0;
+            return false;
+        }
+
+        if (player.horizontalCollision) {
+            corneredTicks++;
+        } else {
+            corneredTicks = 0;
+        }
+        return corneredTicks >= CORNERED_ATTACK_TICKS;
+    }
+
+    private static Vec3d rotateHorizontal(Vec3d vector, double degrees) {
+        double radians = Math.toRadians(degrees);
+        double cos = Math.cos(radians);
+        double sin = Math.sin(radians);
+        return new Vec3d(vector.x * cos - vector.z * sin, vector.y, vector.x * sin + vector.z * cos);
     }
 
     private static void faceEntity(ClientPlayerEntity player, Entity entity) {
@@ -277,13 +336,63 @@ public final class LiveControlClient implements ClientModInitializer {
     private static void stopMovement(MinecraftClient client, ClientPlayerEntity player) {
         client.options.forwardKey.setPressed(false);
         client.options.sprintKey.setPressed(false);
+        client.options.backKey.setPressed(false);
+        client.options.leftKey.setPressed(false);
+        client.options.rightKey.setPressed(false);
         player.setSprinting(false);
         player.input.pressingForward = false;
+        player.input.pressingBack = false;
+        player.input.pressingLeft = false;
+        player.input.pressingRight = false;
         player.input.movementForward = 0.0F;
+        player.input.movementSideways = 0.0F;
+    }
+
+    private static void beginAutoFight(Entity target) {
+        cancelQueuedLiveChatCommands();
+        sendMinecraftChatMessage("#stop");
+        attackTarget = target;
+        runningFromMobs = false;
+        obstacleAvoidanceTicks = 0;
+        corneredTicks = 0;
+    }
+
+    private static void setAutoJumpEnabled(boolean enabled) {
+        MinecraftClient.getInstance().options.getAutoJump().setValue(enabled);
+    }
+
+    private static void tickQueuedLiveChatCommands(MinecraftClient client) {
+        if (queuedLiveChatCommands.isEmpty()) {
+            return;
+        }
+
+        if (queuedLiveChatCommandTicks > 0) {
+            queuedLiveChatCommandTicks--;
+            return;
+        }
+
+        String message = queuedLiveChatCommands.poll();
+        sendMinecraftChatMessage(client, message);
+        queuedLiveChatCommandTicks = COMMAND_SEQUENCE_DELAY_TICKS;
+    }
+
+    private static void queueLiveChatCommands(String[] messages) {
+        cancelQueuedLiveChatCommands();
+        queuedLiveChatCommands.addAll(Arrays.asList(messages));
+        queuedLiveChatCommandTicks = 0;
+        tickQueuedLiveChatCommands(MinecraftClient.getInstance());
+    }
+
+    private static void cancelQueuedLiveChatCommands() {
+        queuedLiveChatCommands.clear();
+        queuedLiveChatCommandTicks = 0;
     }
 
     private static void sendMinecraftChatMessage(String message) {
-        MinecraftClient client = MinecraftClient.getInstance();
+        sendMinecraftChatMessage(MinecraftClient.getInstance(), message);
+    }
+
+    private static void sendMinecraftChatMessage(MinecraftClient client, String message) {
         if (client.player == null || client.getNetworkHandler() == null) {
             return;
         }

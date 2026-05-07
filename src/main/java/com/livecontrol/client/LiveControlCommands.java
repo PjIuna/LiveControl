@@ -9,18 +9,30 @@ import java.util.stream.Stream;
 public enum LiveControlCommands {
     STONE("Stone", "#mine stone", "stone", "#stone", "#mine stone"),
     WOOD("Wood", "#mine oak_log", "wood", "#wood", "#mine wood", "#mine oak_log"),
+    PICKAXE("Pickaxe", new String[]{
+            "#craft crafting_table",
+            "#place crafting_table",
+            "#rightclick crafting_table",
+            "#craft oak_planks",
+            "#craft stick",
+            "#craft wooden_pickaxe"
+    }, "pickaxe", "wood pickaxe", "wooden pickaxe", "#pickaxe", "#craft wooden_pickaxe"),
     HOME("Home", "#home", "home", "#home"),
     LOOT("Loot", "#pickup", "loot", "#loot", "pickup", "#pickup");
 
     private static final String BOSS_BAR_PREFIX = "LiveControl Commands: ";
 
     private final String displayName;
-    private final String chatCommand;
+    private final String[] chatCommands;
     private final String[] liveChatTriggers;
 
     LiveControlCommands(String displayName, String chatCommand, String... liveChatTriggers) {
+        this(displayName, new String[]{chatCommand}, liveChatTriggers);
+    }
+
+    LiveControlCommands(String displayName, String[] chatCommands, String... liveChatTriggers) {
         this.displayName = displayName;
-        this.chatCommand = chatCommand;
+        this.chatCommands = chatCommands;
         this.liveChatTriggers = liveChatTriggers;
     }
 
@@ -29,7 +41,11 @@ public enum LiveControlCommands {
     }
 
     public String chatCommand() {
-        return chatCommand;
+        return chatCommands[0];
+    }
+
+    public String[] chatCommands() {
+        return Arrays.copyOf(chatCommands, chatCommands.length);
     }
 
     public static Optional<LiveControlCommands> fromChatMessage(String message) {
