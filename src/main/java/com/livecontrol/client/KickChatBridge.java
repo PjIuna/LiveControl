@@ -15,30 +15,33 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 
-public final class YoutubeChatBridge {
-    private static final String API_URL = "https://www.googleapis.com/youtube/v3/liveChat/messages";
+public final class KickChatBridge {
+    private static final String API_URL = "https://kick.com/api/v2/channels/%s/messages";
+    private static final int MAX_SEEN_MESSAGES = 200;
 
     private final HttpClient httpClient = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(10))
             .build();
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(runnable -> {
-        Thread thread = new Thread(runnable, "LiveControl YouTube Chat");
+        Thread thread = new Thread(runnable, "LiveControl Kick Chat");
         thread.setDaemon(true);
         return thread;
     });
 
+    private final Set<String> seenMessageIds = new HashSet<>();
     private ScheduledFuture<?> pollingTask;
-    private String nextPageToken = "";
 
     public void restart() {
         stop();
         LiveControlConfig config = LiveControlClient.config();
-        if (!config.isReadyForYoutube()) {
+        if (!config.isReadyForKick()) {
             return;
         }
 
@@ -55,67 +58,102 @@ public final class YoutubeChatBridge {
             pollingTask.cancel(false);
             pollingTask = null;
         }
-        nextPageToken = "";
+        seenMessageIds.clear();
     }
 
     private void poll(LiveControlConfig config) {
         try {
             HttpRequest request = HttpRequest.newBuilder(buildUri(config))
                     .timeout(Duration.ofSeconds(15))
+                    .header("User-Agent", "LiveControl Minecraft Mod")
                     .GET()
                     .build();
             HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
             if (response.statusCode() != 200) {
-                LiveControlClient.LOGGER.warn("YouTube chat poll failed with HTTP {}", response.statusCode());
+                LiveControlClient.LOGGER.warn("Kick chat poll failed with HTTP {}", response.statusCode());
                 return;
             }
 
-            JsonObject root = JsonParser.parseString(response.body()).getAsJsonObject();
-            if (root.has("nextPageToken")) {
-                nextPageToken = root.get("nextPageToken").getAsString();
-            }
-
-            JsonArray items = root.has("items") ? root.getAsJsonArray("items") : new JsonArray();
-            for (JsonElement item : items) {
-                handleItem(item.getAsJsonObject());
-            }
+            JsonElement root = JsonParser.parseString(response.body());
+            handleMessages(root);
         } catch (IOException exception) {
-            LiveControlClient.LOGGER.warn("Network error while polling YouTube chat", exception);
+            LiveControlClient.LOGGER.warn("Network error while polling Kick chat", exception);
         } catch (InterruptedException exception) {
             Thread.currentThread().interrupt();
         } catch (RuntimeException exception) {
-            LiveControlClient.LOGGER.warn("Unexpected YouTube chat response", exception);
+            LiveControlClient.LOGGER.warn("Unexpected Kick chat response", exception);
         }
     }
 
     private URI buildUri(LiveControlConfig config) {
-        StringBuilder url = new StringBuilder(API_URL)
-                .append("?part=snippet")
-                .append("&profileImageSize=16")
-                .append("&liveChatId=").append(encode(config.youtubeLiveChatId))
-                .append("&key=").append(encode(config.youtubeApiKey));
-        if (!nextPageToken.isBlank()) {
-            url.append("&pageToken=").append(encode(nextPageToken));
-        }
-        return URI.create(url.toString());
+        return URI.create(String.format(API_URL, encode(config.kickChannel)));
     }
 
     private static String encode(String value) {
         return URLEncoder.encode(value, StandardCharsets.UTF_8);
     }
 
-    private static void handleItem(JsonObject item) {
-        JsonObject snippet = item.has("snippet") ? item.getAsJsonObject("snippet") : null;
-        if (snippet == null || !snippet.has("displayMessage")) {
+    private void handleMessages(JsonElement root) {
+        if (root == null || root.isJsonNull()) {
             return;
         }
 
+        if (root.isJsonArray()) {
+            handleMessageArray(root.getAsJsonArray());
+        } else if (root.isJsonObject()) {
+            JsonObject object = root.getAsJsonObject();
+            if (object.has("data") && object.get("data").isJsonObject()) {
+                JsonObject data = object.getAsJsonObject("data");
+                if (data.has("messages") && data.get("messages").isJsonArray()) {
+                    handleMessageArray(data.getAsJsonArray("messages"));
+                    return;
+                }
+            }
+            if (object.has("messages") && object.get("messages").isJsonArray()) {
+                handleMessageArray(object.getAsJsonArray("messages"));
+            }
+        }
+    }
+
+    private void handleMessageArray(JsonArray messages) {
+        for (JsonElement messageElement : messages) {
+            if (!messageElement.isJsonObject()) {
+                continue;
+            }
+
+            JsonObject message = messageElement.getAsJsonObject();
+            String id = message.has("id") ? message.get("id").getAsString() : message.toString();
+            if (!seenMessageIds.add(id)) {
+                continue;
+            }
+
+            if (seenMessageIds.size() > MAX_SEEN_MESSAGES) {
+                seenMessageIds.clear();
+            }
+
+            String content = extractContent(message);
+            if (content != null) {
+                handleChatMessage(content);
+            }
+        }
+    }
+
+    private static String extractContent(JsonObject message) {
+        if (message.has("content")) {
+            return message.get("content").getAsString();
+        }
+        if (message.has("message")) {
+            return message.get("message").getAsString();
+        }
+        return null;
+    }
+
+    private static void handleChatMessage(String message) {
         if (!LiveControlClient.areChatCommandsEnabled()) {
             return;
         }
 
-        String displayMessage = snippet.get("displayMessage").getAsString();
-        LiveControlCommands.fromChatMessage(displayMessage).ifPresent(command -> {
+        LiveControlCommands.fromChatMessage(message).ifPresent(command -> {
             MinecraftClient client = MinecraftClient.getInstance();
             client.execute(() -> sendMinecraftChatMessage(client, command));
         });

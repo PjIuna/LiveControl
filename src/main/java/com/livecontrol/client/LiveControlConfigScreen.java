@@ -14,46 +14,73 @@ public final class LiveControlConfigScreen extends Screen {
     private final Screen parent;
     private TextFieldWidget apiKeyField;
     private TextFieldWidget liveChatIdField;
+    private TextFieldWidget twitchChannelField;
+    private TextFieldWidget kickChannelField;
     private TextFieldWidget pollSecondsField;
     private boolean youtubeEnabled;
+    private boolean twitchEnabled;
+    private boolean kickEnabled;
 
     public LiveControlConfigScreen(Screen parent) {
         super(Text.literal("LiveControl Configuration"));
         this.parent = parent;
-        this.youtubeEnabled = LiveControlClient.config().youtubeIntegrationEnabled;
+        LiveControlConfig config = LiveControlClient.config();
+        this.youtubeEnabled = config.youtubeIntegrationEnabled;
+        this.twitchEnabled = config.twitchIntegrationEnabled;
+        this.kickEnabled = config.kickIntegrationEnabled;
     }
 
     @Override
     protected void init() {
         int centerX = width / 2;
-        int startY = height / 4;
+        int startY = 24;
         LiveControlConfig config = LiveControlClient.config();
 
-        apiKeyField = new TextFieldWidget(textRenderer, centerX - FIELD_WIDTH / 2, startY + 34, FIELD_WIDTH, FIELD_HEIGHT, Text.literal("YouTube API Key"));
+        apiKeyField = new TextFieldWidget(textRenderer, centerX - FIELD_WIDTH / 2, startY + 28, FIELD_WIDTH, FIELD_HEIGHT, Text.literal("YouTube API Key"));
         apiKeyField.setMaxLength(256);
         apiKeyField.setText(config.youtubeApiKey);
         addDrawableChild(apiKeyField);
 
-        liveChatIdField = new TextFieldWidget(textRenderer, centerX - FIELD_WIDTH / 2, startY + 74, FIELD_WIDTH, FIELD_HEIGHT, Text.literal("YouTube Live Chat ID"));
+        liveChatIdField = new TextFieldWidget(textRenderer, centerX - FIELD_WIDTH / 2, startY + 62, FIELD_WIDTH, FIELD_HEIGHT, Text.literal("YouTube Live Chat ID"));
         liveChatIdField.setMaxLength(256);
         liveChatIdField.setText(config.youtubeLiveChatId);
         addDrawableChild(liveChatIdField);
 
-        pollSecondsField = new TextFieldWidget(textRenderer, centerX - FIELD_WIDTH / 2, startY + 114, FIELD_WIDTH, FIELD_HEIGHT, Text.literal("Poll seconds"));
+        twitchChannelField = new TextFieldWidget(textRenderer, centerX - FIELD_WIDTH / 2, startY + 96, FIELD_WIDTH, FIELD_HEIGHT, Text.literal("Twitch Channel"));
+        twitchChannelField.setMaxLength(64);
+        twitchChannelField.setText(config.twitchChannel);
+        addDrawableChild(twitchChannelField);
+
+        kickChannelField = new TextFieldWidget(textRenderer, centerX - FIELD_WIDTH / 2, startY + 130, FIELD_WIDTH, FIELD_HEIGHT, Text.literal("Kick Channel"));
+        kickChannelField.setMaxLength(64);
+        kickChannelField.setText(config.kickChannel);
+        addDrawableChild(kickChannelField);
+
+        pollSecondsField = new TextFieldWidget(textRenderer, centerX - FIELD_WIDTH / 2, startY + 164, FIELD_WIDTH, FIELD_HEIGHT, Text.literal("Poll seconds"));
         pollSecondsField.setMaxLength(2);
         pollSecondsField.setText(Integer.toString(config.pollSeconds));
         addDrawableChild(pollSecondsField);
 
-        addDrawableChild(ButtonWidget.builder(enabledText(), button -> {
+        addDrawableChild(ButtonWidget.builder(youtubeEnabledText(), button -> {
             youtubeEnabled = !youtubeEnabled;
-            button.setMessage(enabledText());
-        }).dimensions(centerX - FIELD_WIDTH / 2, startY + 145, FIELD_WIDTH, 20).build());
+            button.setMessage(youtubeEnabledText());
+        }).dimensions(centerX - FIELD_WIDTH / 2, startY + 194, 84, 20).build());
+
+        addDrawableChild(ButtonWidget.builder(twitchEnabledText(), button -> {
+            twitchEnabled = !twitchEnabled;
+            button.setMessage(twitchEnabledText());
+        }).dimensions(centerX - 42, startY + 194, 84, 20).build());
+
+        addDrawableChild(ButtonWidget.builder(kickEnabledText(), button -> {
+            kickEnabled = !kickEnabled;
+            button.setMessage(kickEnabledText());
+        }).dimensions(centerX + FIELD_WIDTH / 2 - 84, startY + 194, 84, 20).build());
 
         addDrawableChild(ButtonWidget.builder(Text.literal("Save"), button -> saveAndClose())
-                .dimensions(centerX - 104, startY + 175, 100, 20)
+                .dimensions(centerX - 104, startY + 220, 100, 20)
                 .build());
         addDrawableChild(ButtonWidget.builder(Text.literal("Cancel"), button -> close())
-                .dimensions(centerX + 4, startY + 175, 100, 20)
+                .dimensions(centerX + 4, startY + 220, 100, 20)
                 .build());
     }
 
@@ -61,14 +88,16 @@ public final class LiveControlConfigScreen extends Screen {
     public void render(DrawContext context, int mouseX, int mouseY, float delta) {
         renderBackground(context);
         int centerX = width / 2;
-        int startY = height / 4;
+        int startY = 24;
 
-        context.drawCenteredTextWithShadow(textRenderer, title, centerX, startY - 10, 0xFFFFFFFF);
-        context.drawTextWithShadow(textRenderer, "YouTube Data API key", centerX - FIELD_WIDTH / 2, startY + 22, 0xFFA0FFFF);
-        context.drawTextWithShadow(textRenderer, "Live chat ID", centerX - FIELD_WIDTH / 2, startY + 62, 0xFFA0FFFF);
-        context.drawTextWithShadow(textRenderer, "Poll interval, 2-60 seconds", centerX - FIELD_WIDTH / 2, startY + 102, 0xFFA0FFFF);
-        context.drawCenteredTextWithShadow(textRenderer, LiveControlCommands.bossBarHint(), centerX, startY + 210, 0xFF00E5FF);
-        context.drawCenteredTextWithShadow(textRenderer, "Chat messages Stone, Wood, and Home send Minecraft chat commands.", centerX, startY + 224, 0xFFAAAAAA);
+        context.drawCenteredTextWithShadow(textRenderer, title, centerX, startY - 14, 0xFFFFFFFF);
+        context.drawTextWithShadow(textRenderer, "YouTube Data API key", centerX - FIELD_WIDTH / 2, startY + 16, 0xFFA0FFFF);
+        context.drawTextWithShadow(textRenderer, "YouTube live chat ID", centerX - FIELD_WIDTH / 2, startY + 50, 0xFFA0FFFF);
+        context.drawTextWithShadow(textRenderer, "Twitch channel", centerX - FIELD_WIDTH / 2, startY + 84, 0xFFA0FFFF);
+        context.drawTextWithShadow(textRenderer, "Kick channel", centerX - FIELD_WIDTH / 2, startY + 118, 0xFFA0FFFF);
+        context.drawTextWithShadow(textRenderer, "Poll interval, 2-60 seconds", centerX - FIELD_WIDTH / 2, startY + 152, 0xFFA0FFFF);
+        context.drawCenteredTextWithShadow(textRenderer, "Chat commands: " + LiveControlCommands.bossBarHint(), centerX, startY + 248, 0xFF00E5FF);
+        context.drawCenteredTextWithShadow(textRenderer, "Only the live chat command is shown and sent in Minecraft chat.", centerX, startY + 262, 0xFFAAAAAA);
 
         super.render(context, mouseX, mouseY, delta);
     }
@@ -78,8 +107,20 @@ public final class LiveControlConfigScreen extends Screen {
         MinecraftClient.getInstance().setScreen(parent);
     }
 
-    private Text enabledText() {
-        return Text.literal("YouTube integration: " + (youtubeEnabled ? "Enabled" : "Disabled"));
+    private Text youtubeEnabledText() {
+        return Text.literal("YouTube: " + enabledLabel(youtubeEnabled));
+    }
+
+    private Text twitchEnabledText() {
+        return Text.literal("Twitch: " + enabledLabel(twitchEnabled));
+    }
+
+    private Text kickEnabledText() {
+        return Text.literal("Kick: " + enabledLabel(kickEnabled));
+    }
+
+    private static String enabledLabel(boolean enabled) {
+        return enabled ? "On" : "Off";
     }
 
     private void saveAndClose() {
@@ -87,6 +128,10 @@ public final class LiveControlConfigScreen extends Screen {
         config.youtubeIntegrationEnabled = youtubeEnabled;
         config.youtubeApiKey = apiKeyField.getText();
         config.youtubeLiveChatId = liveChatIdField.getText();
+        config.twitchIntegrationEnabled = twitchEnabled;
+        config.twitchChannel = twitchChannelField.getText();
+        config.kickIntegrationEnabled = kickEnabled;
+        config.kickChannel = kickChannelField.getText();
         config.pollSeconds = parsePollSeconds(pollSecondsField.getText());
         LiveControlClient.saveConfig(config);
         close();
