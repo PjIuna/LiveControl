@@ -110,6 +110,10 @@ public final class YoutubeChatBridge {
             return;
         }
 
+        if (!LiveControlClient.areChatCommandsEnabled()) {
+            return;
+        }
+
         String displayMessage = snippet.get("displayMessage").getAsString();
         LiveControlCommands.fromChatMessage(displayMessage).ifPresent(command -> {
             MinecraftClient client = MinecraftClient.getInstance();
