@@ -21,6 +21,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public final class KickChatBridge {
     private static final String API_URL = "https://kick.com/api/v2/channels/%s/messages";
@@ -36,9 +37,11 @@ public final class KickChatBridge {
     });
 
     private final Set<String> seenMessageIds = new HashSet<>();
+    private final AtomicBoolean pollInProgress = new AtomicBoolean(false);
+
     private ScheduledFuture<?> pollingTask;
 
-    public void restart() {
+    public synchronized void restart() {
         stop();
         LiveControlConfig config = LiveControlClient.config();
         if (!config.isReadyForKick()) {
@@ -46,19 +49,43 @@ public final class KickChatBridge {
         }
 
         pollingTask = scheduler.scheduleWithFixedDelay(
-                () -> poll(config),
+                () -> pollSafely(config),
                 0,
                 config.pollSeconds,
                 TimeUnit.SECONDS
         );
     }
 
-    public void stop() {
+    public synchronized void ensureRunning() {
+        LiveControlConfig config = LiveControlClient.config();
+        if (!config.isReadyForKick()) {
+            stop();
+            return;
+        }
+
+        if (pollingTask == null || pollingTask.isCancelled() || pollingTask.isDone()) {
+            restart();
+        }
+    }
+
+    public synchronized void stop() {
         if (pollingTask != null) {
             pollingTask.cancel(false);
             pollingTask = null;
         }
         seenMessageIds.clear();
+    }
+
+    private void pollSafely(LiveControlConfig config) {
+        if (!pollInProgress.compareAndSet(false, true)) {
+            return;
+        }
+
+        try {
+            poll(config);
+        } finally {
+            pollInProgress.set(false);
+        }
     }
 
     private void poll(LiveControlConfig config) {

@@ -39,6 +39,18 @@ public final class TwitchChatBridge {
         chatTask = executor.submit(() -> listen(channel));
     }
 
+    public synchronized void ensureRunning() {
+        LiveControlConfig config = LiveControlClient.config();
+        if (!config.isReadyForTwitch()) {
+            stop();
+            return;
+        }
+
+        if (chatTask == null || chatTask.isCancelled() || chatTask.isDone()) {
+            restart();
+        }
+    }
+
     public synchronized void stop() {
         if (chatTask != null) {
             chatTask.cancel(true);

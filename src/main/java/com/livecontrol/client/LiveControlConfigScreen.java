@@ -96,8 +96,8 @@ public final class LiveControlConfigScreen extends Screen {
         context.drawTextWithShadow(textRenderer, "Twitch channel", centerX - FIELD_WIDTH / 2, startY + 84, 0xFFA0FFFF);
         context.drawTextWithShadow(textRenderer, "Kick channel", centerX - FIELD_WIDTH / 2, startY + 118, 0xFFA0FFFF);
         context.drawTextWithShadow(textRenderer, "Poll interval, 2-60 seconds", centerX - FIELD_WIDTH / 2, startY + 152, 0xFFA0FFFF);
-        context.drawCenteredTextWithShadow(textRenderer, "Chat commands: " + LiveControlCommands.bossBarHint(), centerX, startY + 248, 0xFF00E5FF);
-        context.drawCenteredTextWithShadow(textRenderer, "Only the live chat command is shown and sent in Minecraft chat.", centerX, startY + 262, 0xFFAAAAAA);
+        context.drawCenteredTextWithShadow(textRenderer, "Live chat commands: " + LiveControlCommands.liveChatHint(), centerX, startY + 248, 0xFF00E5FF);
+        context.drawCenteredTextWithShadow(textRenderer, "Viewers can type those words; LiveControl sends the matching Minecraft command.", centerX, startY + 262, 0xFFAAAAAA);
 
         super.render(context, mouseX, mouseY, delta);
     }

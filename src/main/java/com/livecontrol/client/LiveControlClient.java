@@ -22,18 +22,23 @@ public final class LiveControlClient implements ClientModInitializer {
     private static final TwitchChatBridge TWITCH_CHAT_BRIDGE = new TwitchChatBridge();
     private static final KickChatBridge KICK_CHAT_BRIDGE = new KickChatBridge();
     private static final int ATTACK_ESCAPE_TICKS = 60;
+    private static final int CHAT_BRIDGE_WATCHDOG_INTERVAL_TICKS = 20 * 20;
     private static LiveControlConfig config;
     private static boolean chatCommandsEnabled = true;
     private static int previousHurtTime = 0;
     private static int escapeTicks = 0;
     private static double escapeYaw = 0.0D;
+    private static int chatBridgeWatchdogTicks = 0;
 
     @Override
     public void onInitializeClient() {
         config = LiveControlConfig.load();
         registerCommands();
         ClientTickEvents.START_CLIENT_TICK.register(LiveControlClient::tickAttackEscape);
-        ClientTickEvents.END_CLIENT_TICK.register(client -> LiveControlBossBar.tick());
+        ClientTickEvents.END_CLIENT_TICK.register(client -> {
+            LiveControlBossBar.tick();
+            tickChatBridgeWatchdog();
+        });
         restartChatBridges();
     }
 
@@ -51,9 +56,22 @@ public final class LiveControlClient implements ClientModInitializer {
     }
 
     private static void restartChatBridges() {
+        chatBridgeWatchdogTicks = 0;
         YOUTUBE_CHAT_BRIDGE.restart();
         TWITCH_CHAT_BRIDGE.restart();
         KICK_CHAT_BRIDGE.restart();
+    }
+
+    private static void tickChatBridgeWatchdog() {
+        chatBridgeWatchdogTicks++;
+        if (chatBridgeWatchdogTicks < CHAT_BRIDGE_WATCHDOG_INTERVAL_TICKS) {
+            return;
+        }
+
+        chatBridgeWatchdogTicks = 0;
+        YOUTUBE_CHAT_BRIDGE.ensureRunning();
+        TWITCH_CHAT_BRIDGE.ensureRunning();
+        KICK_CHAT_BRIDGE.ensureRunning();
     }
 
     public static boolean areChatCommandsEnabled() {
