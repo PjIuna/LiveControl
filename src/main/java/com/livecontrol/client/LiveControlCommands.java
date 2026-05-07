@@ -9,7 +9,8 @@ import java.util.stream.Stream;
 public enum LiveControlCommands {
     STONE("Stone", "#mine stone", "stone", "#stone", "#mine stone"),
     WOOD("Wood", "#mine oak_log", "wood", "#wood", "#mine wood", "#mine oak_log"),
-    HOME("Home", "#home", "home", "#home");
+    HOME("Home", "#home", "home", "#home"),
+    LOOT("Loot", "#pickup", "loot", "#loot", "pickup", "#pickup");
 
     private static final String BOSS_BAR_PREFIX = "LiveControl Commands: ";
 
