@@ -17,6 +17,10 @@ public final class LiveControlConfig {
     public boolean youtubeIntegrationEnabled = false;
     public String youtubeApiKey = "";
     public String youtubeLiveChatId = "";
+    public boolean twitchIntegrationEnabled = false;
+    public String twitchChannel = "";
+    public boolean kickIntegrationEnabled = false;
+    public String kickChannel = "";
     public int pollSeconds = 5;
 
     public static LiveControlConfig load() {
@@ -52,9 +56,23 @@ public final class LiveControlConfig {
                 && !youtubeLiveChatId.isBlank();
     }
 
+    public boolean isReadyForTwitch() {
+        return twitchIntegrationEnabled && !twitchChannel.isBlank();
+    }
+
+    public boolean isReadyForKick() {
+        return kickIntegrationEnabled && !kickChannel.isBlank();
+    }
+
+    private static String sanitizeChannel(String value) {
+        return value == null ? "" : value.trim().replaceFirst("^@", "");
+    }
+
     private LiveControlConfig sanitized() {
         youtubeApiKey = youtubeApiKey == null ? "" : youtubeApiKey.trim();
         youtubeLiveChatId = youtubeLiveChatId == null ? "" : youtubeLiveChatId.trim();
+        twitchChannel = sanitizeChannel(twitchChannel);
+        kickChannel = sanitizeChannel(kickChannel);
         pollSeconds = Math.max(2, Math.min(60, pollSeconds));
         return this;
     }

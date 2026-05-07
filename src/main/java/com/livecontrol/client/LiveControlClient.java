@@ -19,6 +19,8 @@ public final class LiveControlClient implements ClientModInitializer {
     public static final Logger LOGGER = LoggerFactory.getLogger(MOD_ID);
 
     private static final YoutubeChatBridge YOUTUBE_CHAT_BRIDGE = new YoutubeChatBridge();
+    private static final TwitchChatBridge TWITCH_CHAT_BRIDGE = new TwitchChatBridge();
+    private static final KickChatBridge KICK_CHAT_BRIDGE = new KickChatBridge();
     private static final int ATTACK_ESCAPE_TICKS = 60;
     private static LiveControlConfig config;
     private static boolean chatCommandsEnabled = true;
@@ -30,8 +32,9 @@ public final class LiveControlClient implements ClientModInitializer {
     public void onInitializeClient() {
         config = LiveControlConfig.load();
         registerCommands();
-        ClientTickEvents.END_CLIENT_TICK.register(LiveControlClient::tickAttackEscape);
-        YOUTUBE_CHAT_BRIDGE.restart();
+        ClientTickEvents.START_CLIENT_TICK.register(LiveControlClient::tickAttackEscape);
+        ClientTickEvents.END_CLIENT_TICK.register(client -> LiveControlBossBar.tick());
+        restartChatBridges();
     }
 
     public static LiveControlConfig config() {
@@ -44,7 +47,13 @@ public final class LiveControlClient implements ClientModInitializer {
     public static void saveConfig(LiveControlConfig updatedConfig) {
         config = updatedConfig;
         config.save();
+        restartChatBridges();
+    }
+
+    private static void restartChatBridges() {
         YOUTUBE_CHAT_BRIDGE.restart();
+        TWITCH_CHAT_BRIDGE.restart();
+        KICK_CHAT_BRIDGE.restart();
     }
 
     public static boolean areChatCommandsEnabled() {
@@ -99,7 +108,7 @@ public final class LiveControlClient implements ClientModInitializer {
         previousHurtTime = player.hurtTime;
 
         if (escapeTicks > 0) {
-            runAway(player);
+            runAway(client, player);
             escapeTicks--;
         }
     }
@@ -122,15 +131,23 @@ public final class LiveControlClient implements ClientModInitializer {
         escapeTicks = ATTACK_ESCAPE_TICKS;
     }
 
-    private static void runAway(ClientPlayerEntity player) {
+    private static void runAway(MinecraftClient client, ClientPlayerEntity player) {
         player.setYaw((float) escapeYaw);
         player.setSprinting(true);
+        client.options.forwardKey.setPressed(true);
+        client.options.sprintKey.setPressed(true);
+        client.options.backKey.setPressed(false);
+        client.options.leftKey.setPressed(false);
+        client.options.rightKey.setPressed(false);
         player.input.pressingForward = true;
         player.input.pressingBack = false;
         player.input.pressingLeft = false;
         player.input.pressingRight = false;
         player.input.movementForward = 1.0F;
         player.input.movementSideways = 0.0F;
+        Vec3d forward = Vec3d.fromPolar(0.0F, (float) escapeYaw).normalize().multiply(0.18D);
+        Vec3d velocity = player.getVelocity();
+        player.setVelocity(forward.x, velocity.y, forward.z);
     }
 
     private static void sendMinecraftChatMessage(String message) {

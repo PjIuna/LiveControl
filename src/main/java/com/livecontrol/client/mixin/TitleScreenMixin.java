@@ -21,7 +21,7 @@ public abstract class TitleScreenMixin extends Screen {
     private void livecontrol$addConfigButton(CallbackInfo ci) {
         addDrawableChild(ButtonWidget.builder(Text.literal("LiveControl"), button ->
                         MinecraftClient.getInstance().setScreen(new LiveControlConfigScreen(this)))
-                .dimensions(this.width - 108, this.height - 26, 100, 20)
+                .dimensions(this.width - 108, this.height - 50, 100, 20)
                 .build());
     }
 }
