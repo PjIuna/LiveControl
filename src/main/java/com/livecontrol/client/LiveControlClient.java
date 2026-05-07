@@ -6,6 +6,7 @@ import net.fabricmc.fabric.api.client.command.v2.ClientCommandManager;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.gui.screen.DeathScreen;
 import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.LivingEntity;
@@ -40,8 +41,10 @@ public final class LiveControlClient implements ClientModInitializer {
     private static final int COMMAND_SEQUENCE_DELAY_TICKS = 25;
     private static final int OBSTACLE_AVOIDANCE_TICKS = 12;
     private static final int CORNERED_ATTACK_TICKS = 10;
+    private static final double CAMERA_FOLLOW_MOVEMENT_THRESHOLD = 1.0E-4D;
     private static LiveControlConfig config;
     private static boolean chatCommandsEnabled = true;
+    private static boolean cameraFollowsPlayerMovement = false;
     private static int previousHurtTime = 0;
     private static int chatBridgeWatchdogTicks = 0;
     private static long lastLiveChatCommandTime = 0L;
@@ -52,6 +55,7 @@ public final class LiveControlClient implements ClientModInitializer {
     private static int obstacleAvoidanceTicks = 0;
     private static int obstacleAvoidanceDirection = 1;
     private static int corneredTicks = 0;
+    private static Vec3d previousCameraFollowPosition;
 
     @Override
     public void onInitializeClient() {
@@ -60,6 +64,8 @@ public final class LiveControlClient implements ClientModInitializer {
         setAutoJumpEnabled(chatCommandsEnabled);
         ClientTickEvents.START_CLIENT_TICK.register(LiveControlClient::tickCombatAutomation);
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
+            tickAutoRespawn(client);
+            tickCameraFollowMovement(client);
             tickQueuedLiveChatCommands(client);
             LiveControlBossBar.tick();
             tickChatBridgeWatchdog();
@@ -132,12 +138,16 @@ public final class LiveControlClient implements ClientModInitializer {
                     .executes(context -> {
                         boolean visible = !LiveControlBossBar.isVisible();
                         chatCommandsEnabled = visible;
+                        cameraFollowsPlayerMovement = visible;
+                        if (!visible) {
+                            previousCameraFollowPosition = null;
+                        }
                         setAutoJumpEnabled(visible);
                         LiveControlBossBar.setVisible(visible);
                         context.getSource().sendFeedback(Text.literal(
                                 visible
-                                        ? "LiveControl AFK boss bar and chat commands enabled."
-                                        : "LiveControl AFK boss bar and chat commands disabled."
+                                        ? "LiveControl AFK boss bar, chat commands, and movement camera follow enabled."
+                                        : "LiveControl AFK boss bar, chat commands, and movement camera follow disabled."
                         ));
                         return Command.SINGLE_SUCCESS;
                     }));
@@ -145,7 +155,7 @@ public final class LiveControlClient implements ClientModInitializer {
             dispatcher.register(ClientCommandManager.literal("back")
                     .executes(context -> {
                         goBack();
-                        context.getSource().sendFeedback(Text.literal("LiveControl chat commands disabled and #stop sent."));
+                        context.getSource().sendFeedback(Text.literal("LiveControl chat commands and movement camera follow disabled; #stop sent."));
                         return Command.SINGLE_SUCCESS;
                     }));
         });
@@ -153,6 +163,8 @@ public final class LiveControlClient implements ClientModInitializer {
 
     private static void goBack() {
         chatCommandsEnabled = false;
+        cameraFollowsPlayerMovement = false;
+        previousCameraFollowPosition = null;
         setAutoJumpEnabled(false);
         LiveControlBossBar.setVisible(false);
         cancelQueuedLiveChatCommands();
@@ -185,6 +197,37 @@ public final class LiveControlClient implements ClientModInitializer {
         }
 
         tickMobEscape(client, player);
+    }
+
+    private static void tickAutoRespawn(MinecraftClient client) {
+        ClientPlayerEntity player = client.player;
+        if (player == null) {
+            return;
+        }
+
+        if (!player.isAlive() || player.getHealth() <= 0.0F) {
+            player.requestRespawn();
+            if (client.currentScreen instanceof DeathScreen) {
+                client.setScreen(null);
+            }
+        }
+    }
+
+    private static void tickCameraFollowMovement(MinecraftClient client) {
+        ClientPlayerEntity player = client.player;
+        if (player == null || !cameraFollowsPlayerMovement || !player.isAlive()) {
+            previousCameraFollowPosition = player == null ? null : player.getPos();
+            return;
+        }
+
+        Vec3d currentPosition = player.getPos();
+        if (previousCameraFollowPosition != null) {
+            Vec3d movement = currentPosition.subtract(previousCameraFollowPosition);
+            if (movement.horizontalLengthSquared() > CAMERA_FOLLOW_MOVEMENT_THRESHOLD) {
+                setYawFromVector(player, movement);
+            }
+        }
+        previousCameraFollowPosition = currentPosition;
     }
 
     private static Entity getAttacker(ClientPlayerEntity player) {
