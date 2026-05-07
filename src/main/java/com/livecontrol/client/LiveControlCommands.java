@@ -9,14 +9,7 @@ import java.util.stream.Stream;
 public enum LiveControlCommands {
     STONE("Stone", "#mine stone", "stone", "#stone", "#mine stone"),
     WOOD("Wood", "#mine oak_log", "wood", "#wood", "#mine wood", "#mine oak_log"),
-    PICKAXE("Pickaxe", new String[]{
-            "#craft crafting_table",
-            "#place crafting_table",
-            "#rightclick crafting_table",
-            "#craft oak_planks",
-            "#craft stick",
-            "#craft wooden_pickaxe"
-    }, "pickaxe", "wood pickaxe", "wooden pickaxe", "#pickaxe", "#craft wooden_pickaxe"),
+    PICKAXE("Pickaxe", new String[0], "pickaxe", "wood pickaxe", "wooden pickaxe", "#pickaxe", "#craft wooden_pickaxe"),
     HOME("Home", "#home", "home", "#home"),
     LOOT("Loot", "#pickup", "loot", "#loot", "pickup", "#pickup");
 
@@ -41,7 +34,7 @@ public enum LiveControlCommands {
     }
 
     public String chatCommand() {
-        return chatCommands[0];
+        return chatCommands.length == 0 ? "" : chatCommands[0];
     }
 
     public String[] chatCommands() {
