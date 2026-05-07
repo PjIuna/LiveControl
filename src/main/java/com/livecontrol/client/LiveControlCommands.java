@@ -4,18 +4,23 @@ import java.util.Arrays;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 public enum LiveControlCommands {
-    STONE("Stone", "#mine stone"),
-    WOOD("Wood", "#mine oak_log"),
-    HOME("Home", "#home");
+    STONE("Stone", "#mine stone", "stone", "#stone", "#mine stone"),
+    WOOD("Wood", "#mine oak_log", "wood", "#wood", "#mine wood", "#mine oak_log"),
+    HOME("Home", "#home", "home", "#home");
+
+    private static final String BOSS_BAR_PREFIX = "LiveControl Commands: ";
 
     private final String displayName;
     private final String chatCommand;
+    private final String[] liveChatTriggers;
 
-    LiveControlCommands(String displayName, String chatCommand) {
+    LiveControlCommands(String displayName, String chatCommand, String... liveChatTriggers) {
         this.displayName = displayName;
         this.chatCommand = chatCommand;
+        this.liveChatTriggers = liveChatTriggers;
     }
 
     public String displayName() {
@@ -27,15 +32,35 @@ public enum LiveControlCommands {
     }
 
     public static Optional<LiveControlCommands> fromChatMessage(String message) {
-        String normalized = message.trim().toLowerCase(Locale.ROOT);
+        String normalized = normalize(message);
+        if (normalized.isBlank()) {
+            return Optional.empty();
+        }
+
         return Arrays.stream(values())
-                .filter(command -> command.chatCommand.toLowerCase(Locale.ROOT).equals(normalized))
+                .filter(command -> command.matchesLiveChatTrigger(normalized))
                 .findFirst();
     }
 
     public static String bossBarHint() {
         return Arrays.stream(values())
-                .map(LiveControlCommands::chatCommand)
-                .collect(Collectors.joining("   "));
+                .map(LiveControlCommands::displayName)
+                .collect(Collectors.joining("   ", BOSS_BAR_PREFIX, ""));
+    }
+
+    public static String liveChatHint() {
+        return Arrays.stream(values())
+                .map(LiveControlCommands::displayName)
+                .collect(Collectors.joining(", "));
+    }
+
+    private boolean matchesLiveChatTrigger(String normalizedMessage) {
+        return Stream.concat(Stream.of(displayName), Arrays.stream(liveChatTriggers))
+                .map(LiveControlCommands::normalize)
+                .anyMatch(normalizedMessage::equals);
+    }
+
+    private static String normalize(String value) {
+        return value == null ? "" : value.trim().toLowerCase(Locale.ROOT);
     }
 }

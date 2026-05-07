@@ -19,6 +19,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public final class YoutubeChatBridge {
     private static final String API_URL = "https://www.googleapis.com/youtube/v3/liveChat/messages";
@@ -32,10 +33,12 @@ public final class YoutubeChatBridge {
         return thread;
     });
 
+    private final AtomicBoolean pollInProgress = new AtomicBoolean(false);
+
     private ScheduledFuture<?> pollingTask;
     private String nextPageToken = "";
 
-    public void restart() {
+    public synchronized void restart() {
         stop();
         LiveControlConfig config = LiveControlClient.config();
         if (!config.isReadyForYoutube()) {
@@ -43,19 +46,43 @@ public final class YoutubeChatBridge {
         }
 
         pollingTask = scheduler.scheduleWithFixedDelay(
-                () -> poll(config),
+                () -> pollSafely(config),
                 0,
                 config.pollSeconds,
                 TimeUnit.SECONDS
         );
     }
 
-    public void stop() {
+    public synchronized void ensureRunning() {
+        LiveControlConfig config = LiveControlClient.config();
+        if (!config.isReadyForYoutube()) {
+            stop();
+            return;
+        }
+
+        if (pollingTask == null || pollingTask.isCancelled() || pollingTask.isDone()) {
+            restart();
+        }
+    }
+
+    public synchronized void stop() {
         if (pollingTask != null) {
             pollingTask.cancel(false);
             pollingTask = null;
         }
         nextPageToken = "";
+    }
+
+    private void pollSafely(LiveControlConfig config) {
+        if (!pollInProgress.compareAndSet(false, true)) {
+            return;
+        }
+
+        try {
+            poll(config);
+        } finally {
+            pollInProgress.set(false);
+        }
     }
 
     private void poll(LiveControlConfig config) {
