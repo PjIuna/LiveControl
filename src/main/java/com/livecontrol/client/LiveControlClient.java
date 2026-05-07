@@ -56,6 +56,7 @@ public final class LiveControlClient implements ClientModInitializer {
     private static int obstacleAvoidanceDirection = 1;
     private static int corneredTicks = 0;
     private static Vec3d previousCameraFollowPosition;
+    private static Boolean pendingAutoJumpEnabled;
 
     @Override
     public void onInitializeClient() {
@@ -64,6 +65,7 @@ public final class LiveControlClient implements ClientModInitializer {
         setAutoJumpEnabled(chatCommandsEnabled);
         ClientTickEvents.START_CLIENT_TICK.register(LiveControlClient::tickCombatAutomation);
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
+            applyPendingAutoJumpSetting(client);
             tickAutoRespawn(client);
             tickCameraFollowMovement(client);
             tickQueuedLiveChatCommands(client);
@@ -401,7 +403,17 @@ public final class LiveControlClient implements ClientModInitializer {
     }
 
     private static void setAutoJumpEnabled(boolean enabled) {
-        MinecraftClient.getInstance().options.getAutoJump().setValue(enabled);
+        pendingAutoJumpEnabled = enabled;
+        applyPendingAutoJumpSetting(MinecraftClient.getInstance());
+    }
+
+    private static void applyPendingAutoJumpSetting(MinecraftClient client) {
+        if (pendingAutoJumpEnabled == null || client == null || client.options == null) {
+            return;
+        }
+
+        client.options.getAutoJump().setValue(pendingAutoJumpEnabled);
+        pendingAutoJumpEnabled = null;
     }
 
     private static void tickQueuedLiveChatCommands(MinecraftClient client) {
