@@ -9,6 +9,9 @@ import java.util.stream.Stream;
 public enum LiveControlCommands {
     STONE("Stone", "#mine stone", "stone", "#stone", "#mine stone"),
     WOOD("Wood", "#mine oak_log", "wood", "#wood", "#mine wood", "#mine oak_log"),
+    FARM("Farm", "#farm", "farm", "#farm"),
+    NETHER("Nether", "#goto minecraft:nether_portal", "nether", "#nether", "go nether", "goto nether"),
+    GOLD("Gold", "#mine minecraft:nether_gold_ore", "gold", "#gold", "mine gold", "#mine gold"),
     JUMP("Jump", "#jump", "jump", "#jump"),
     OPEN_INVENTORY("Open Inventory", "#openinv", "open inventory", "open", "inventory", "#open inventory"),
     BREAK("Break", new String[0], "break"),

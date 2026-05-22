@@ -34,6 +34,7 @@ import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
+import net.minecraft.world.World;
 import net.minecraft.block.Blocks;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -88,6 +89,7 @@ public final class LiveControlClient implements ClientModInitializer {
     private static boolean rerunLastCommandAfterRespawn;
     private static boolean wasDead;
     private static boolean wasInWorld;
+    private static boolean pendingHomeAfterNetherPortal;
     // breaking state when holding the break action for several ticks
     private static boolean breakHolding = false;
     private static int breakHoldTicks = 0;
@@ -114,6 +116,7 @@ public final class LiveControlClient implements ClientModInitializer {
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             applyPendingAutoJumpSetting(client);
             tickBackOnJoin(client);
+            tickPendingHomeAfterNetherPortal(client);
             tickAutoRespawn(client);
             tickCameraFollowMovement(client);
             tickPitchRecentering(client);
@@ -337,6 +340,13 @@ public final class LiveControlClient implements ClientModInitializer {
             return;
         }
 
+        if (!isCommandAvailableInCurrentDimension(command, client.player)) {
+            client.player.sendMessage(Text.literal("LiveControl ignored " + command.displayName() + " in this dimension."), true);
+            cancelQueuedLiveChatCommands();
+            lastLiveChatCommandTime = 0L;
+            return;
+        }
+
         long now = System.currentTimeMillis();
         long nextAllowedTime = lastLiveChatCommandTime + LIVE_CHAT_COMMAND_COOLDOWN_MILLIS;
         if (now < nextAllowedTime) {
@@ -406,7 +416,7 @@ public final class LiveControlClient implements ClientModInitializer {
             return;
         }
 
-        String[] commandMessages = command.chatCommands();
+        String[] commandMessages = chatCommandsForCurrentDimension(command, client.player);
         queueLiveChatCommands(commandMessages);
         if (rememberCommand && containsNonStopCommand(commandMessages)) {
             lastExecutedLiveChatCommand = command;
@@ -442,6 +452,7 @@ public final class LiveControlClient implements ClientModInitializer {
                             if (mc != null && mc.getNetworkHandler() != null) {
                                 mc.getNetworkHandler().sendChatMessage("#set renderPath false");
                                 mc.getNetworkHandler().sendChatMessage("#set renderGoal false");
+                                mc.getNetworkHandler().sendChatMessage("#blocksToAvoidBreaking crafting_table,furnace,chest,trapped_chest,oak_planks,oak_fence,oak_fence_gate,glass");
                             }
                         }
                         context.getSource().sendFeedback(Text.literal(
@@ -470,6 +481,7 @@ public final class LiveControlClient implements ClientModInitializer {
         stopChatBridges();
         cancelQueuedLiveChatCommands();
         rerunLastCommandAfterRespawn = false;
+        pendingHomeAfterNetherPortal = false;
         // stop any automated attack/mob state and pickaxe automation; clear movement keys so the player regains control
         MinecraftClient client = MinecraftClient.getInstance();
         if (client != null) {
@@ -489,10 +501,22 @@ public final class LiveControlClient implements ClientModInitializer {
 
     private static void tickBackOnJoin(MinecraftClient client) {
         boolean inWorld = client != null && client.player != null && client.getNetworkHandler() != null && client.world != null;
-        if (inWorld && !wasInWorld) {
+        if (inWorld && !wasInWorld && !pendingHomeAfterNetherPortal) {
             goBack();
         }
         wasInWorld = inWorld;
+    }
+
+    private static void tickPendingHomeAfterNetherPortal(MinecraftClient client) {
+        if (!pendingHomeAfterNetherPortal || !chatCommandsEnabled || client == null || client.player == null || client.getNetworkHandler() == null) {
+            return;
+        }
+
+        if (client.player.getWorld().getRegistryKey() == World.OVERWORLD) {
+            pendingHomeAfterNetherPortal = false;
+            sendMinecraftChatMessage(client, "#home");
+            client.player.sendMessage(Text.literal("LiveControl ran #home after returning to the Overworld."), true);
+        }
     }
 
     private static void tickCombatAutomation(MinecraftClient client) {
@@ -530,8 +554,8 @@ public final class LiveControlClient implements ClientModInitializer {
             }
         }
 
-        // Instead of running away from mobs, begin attack when a hostile is nearby
-        if (attackTarget == null) {
+        // In the Nether, only retaliate after a mob hits first.
+        if (attackTarget == null && !isInNether(player)) {
             HostileEntity nearest = nearestHostileMob(player, MOB_RUN_START_DISTANCE);
             if (nearest != null) {
                 beginAutoFight(nearest);
@@ -571,6 +595,31 @@ public final class LiveControlClient implements ClientModInitializer {
     private static boolean isRunnableCommand(LiveControlCommands command) {
         if (command == null) return false;
         return containsNonStopCommand(command.chatCommands());
+    }
+
+    private static boolean isCommandAvailableInCurrentDimension(LiveControlCommands command, ClientPlayerEntity player) {
+        if (command == LiveControlCommands.STONE && isInNether(player)) {
+            return false;
+        }
+        if (command == LiveControlCommands.GOLD && !isInNether(player)) {
+            return false;
+        }
+        return true;
+    }
+
+    private static String[] chatCommandsForCurrentDimension(LiveControlCommands command, ClientPlayerEntity player) {
+        if (command == LiveControlCommands.HOME && isInNether(player)) {
+            pendingHomeAfterNetherPortal = true;
+            return new String[]{"#goto minecraft:nether_portal"};
+        }
+        if (command == LiveControlCommands.WOOD && isInNether(player)) {
+            return new String[]{"#mine minecraft:crimson_stem"};
+        }
+        return command.chatCommands();
+    }
+
+    private static boolean isInNether(ClientPlayerEntity player) {
+        return player != null && player.getWorld().getRegistryKey() == World.NETHER;
     }
 
     private static void tickCameraFollowMovement(MinecraftClient client) {
