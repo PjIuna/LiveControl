@@ -1,0 +1,79 @@
+﻿package com.livecontrol.client;
+
+import java.util.Arrays;
+import java.util.Locale;
+import java.util.Optional;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
+public enum LiveControlCommands {
+    STONE("Stone", "#mine stone", "stone", "#stone", "#mine stone"),
+    WOOD("Wood", "#mine oak_log", "wood", "#wood", "#mine wood", "#mine oak_log"),
+    JUMP("Jump", "#jump", "jump", "#jump"),
+    OPEN_INVENTORY("Open Inventory", "#openinv", "open inventory", "open", "inventory", "#open inventory"),
+    DROP("Drop", new String[0], "drop"),
+    BREAK("Break", "#break", "break", "#break"),
+    HOME("Home", "#home", "home", "#home"),
+    LOOT("Loot", "#pickup", "loot", "#loot", "pickup", "#pickup");
+
+    private static final String BOSS_BAR_PREFIX = "LiveControl Commands: ";
+
+    private final String displayName;
+    private final String[] chatCommands;
+    private final String[] liveChatTriggers;
+
+    LiveControlCommands(String displayName, String chatCommand, String... liveChatTriggers) {
+        this(displayName, new String[]{chatCommand}, liveChatTriggers);
+    }
+
+    LiveControlCommands(String displayName, String[] chatCommands, String... liveChatTriggers) {
+        this.displayName = displayName;
+        this.chatCommands = chatCommands;
+        this.liveChatTriggers = liveChatTriggers;
+    }
+
+    public String displayName() {
+        return displayName;
+    }
+
+    public String chatCommand() {
+        return chatCommands.length == 0 ? "" : chatCommands[0];
+    }
+
+    public String[] chatCommands() {
+        return Arrays.copyOf(chatCommands, chatCommands.length);
+    }
+
+    public static Optional<LiveControlCommands> fromChatMessage(String message) {
+        String normalized = normalize(message);
+        if (normalized.isBlank()) {
+            return Optional.empty();
+        }
+
+        return Arrays.stream(values())
+                .filter(command -> command.matchesLiveChatTrigger(normalized))
+                .findFirst();
+    }
+
+    public static String bossBarHint() {
+        return Arrays.stream(values())
+                .map(LiveControlCommands::displayName)
+                .collect(Collectors.joining("   ", BOSS_BAR_PREFIX, ""));
+    }
+
+    public static String liveChatHint() {
+        return Arrays.stream(values())
+                .map(LiveControlCommands::displayName)
+                .collect(Collectors.joining(", "));
+    }
+
+    private boolean matchesLiveChatTrigger(String normalizedMessage) {
+        return Stream.concat(Stream.of(displayName), Arrays.stream(liveChatTriggers))
+                .map(LiveControlCommands::normalize)
+                .anyMatch(normalizedMessage::equals);
+    }
+
+    private static String normalize(String value) {
+        return value == null ? "" : value.trim().toLowerCase(Locale.ROOT);
+    }
+}

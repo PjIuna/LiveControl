@@ -13,7 +13,7 @@ import java.util.UUID;
 public final class LiveControlBossBar {
     private static final UUID BOSS_BAR_ID = UUID.nameUUIDFromBytes("livecontrol-afk-bossbar".getBytes(StandardCharsets.UTF_8));
     private static final BossBar.Color BAR_COLOR = BossBar.Color.BLUE;
-    private static final Text BOSS_BAR_TITLE = Text.literal(LiveControlCommands.bossBarHint()).formatted(Formatting.AQUA);
+    private static final Text BOSS_BAR_TITLE = Text.literal("LiveControl AFK").formatted(Formatting.AQUA);
     private static boolean visible = false;
 
     private LiveControlBossBar() {

@@ -1,18 +1,7 @@
-buildscript {
-    repositories {
-        maven { url = 'https://maven.fabricmc.net/' }
-        mavenCentral()
-    }
-    dependencies {
-        classpath 'net.fabricmc:fabric-loom:1.7.4'
-    }
-}
-
 plugins {
+    id 'fabric-loom' version '1.8.+'
     id 'maven-publish'
 }
-
-apply plugin: 'fabric-loom'
 
 version = project.mod_version
 group = project.maven_group
@@ -21,6 +10,11 @@ base {
     archivesName = project.archives_base_name
 }
 
+repositories {
+    mavenCentral()
+    maven { url = 'https://maven.fabricmc.net/' }
+    maven { url = 'https://libraries.minecraft.net/' }
+}
 
 dependencies {
     minecraft "com.mojang:minecraft:${project.minecraft_version}"
@@ -30,9 +24,10 @@ dependencies {
 }
 
 processResources {
-    inputs.property 'version', project.version
-    filesMatching('fabric.mod.json') {
-        expand 'version': inputs.properties.version
+    inputs.property "version", project.version
+
+    filesMatching("fabric.mod.json") {
+        expand "version": project.version
     }
 }
 

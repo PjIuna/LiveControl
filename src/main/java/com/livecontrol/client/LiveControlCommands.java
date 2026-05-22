@@ -9,11 +9,16 @@ import java.util.stream.Stream;
 public enum LiveControlCommands {
     STONE("Stone", "#mine stone", "stone", "#stone", "#mine stone"),
     WOOD("Wood", "#mine oak_log", "wood", "#wood", "#mine wood", "#mine oak_log"),
-    PICKAXE("Pickaxe", new String[0], "pickaxe", "wood pickaxe", "wooden pickaxe", "#pickaxe", "#craft wooden_pickaxe"),
+    JUMP("Jump", "#jump", "jump", "#jump"),
+    OPEN_INVENTORY("Open Inventory", "#openinv", "open inventory", "open", "inventory", "#open inventory"),
+    BREAK("Break", new String[0], "break"),
     HOME("Home", "#home", "home", "#home"),
-    LOOT("Loot", "#pickup", "loot", "#loot", "pickup", "#pickup");
+    LOOT("Loot", "#pickup", "loot", "#loot", "pickup", "#pickup"),
+    EXPLORE("Explore", "#explore", "explore", "#explore"),
+    CLOSE("Close", "#close", "close", "#close"),
+    STOP("Stop", "#stop", "stop", "#stop");
 
-    private static final String BOSS_BAR_PREFIX = "LiveControl Commands: ";
+    private static final String BOSS_BAR_PREFIX = "";
 
     private final String displayName;
     private final String[] chatCommands;
@@ -55,7 +60,7 @@ public enum LiveControlCommands {
     public static String bossBarHint() {
         return Arrays.stream(values())
                 .map(LiveControlCommands::displayName)
-                .collect(Collectors.joining("   ", BOSS_BAR_PREFIX, ""));
+                .collect(Collectors.joining("   "));
     }
 
     public static String liveChatHint() {

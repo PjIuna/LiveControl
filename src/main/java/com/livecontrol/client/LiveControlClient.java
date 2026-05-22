@@ -2,6 +2,8 @@ package com.livecontrol.client;
 
 import com.mojang.brigadier.Command;
 import net.fabricmc.api.ClientModInitializer;
+import net.fabricmc.fabric.api.client.rendering.v1.HudRenderCallback;
+import net.minecraft.client.gui.DrawContext;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandManager;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
@@ -38,6 +40,7 @@ import org.slf4j.LoggerFactory;
 
 import java.util.ArrayDeque;
 import java.util.Arrays;
+import java.util.Locale;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Queue;
@@ -60,10 +63,12 @@ public final class LiveControlClient implements ClientModInitializer {
     private static final int OBSTACLE_AVOIDANCE_TICKS = 12;
     private static final int CORNERED_ATTACK_TICKS = 10;
     private static final double CAMERA_FOLLOW_MOVEMENT_THRESHOLD = 1.0E-4D;
-    private static final int PICKAXE_AUTOMATION_TIMEOUT_TICKS = 20 * 20;
-    private static final int PICKAXE_AUTOMATION_RETRY_TICKS = 5;
+    private static final int BREAK_HOLD_TICKS_REQUIRED = 20 * 4; // 4 seconds
+    private static final float PITCH_TILT_THRESHOLD_DEGREES = 10.0F;
+    private static final int PITCH_TILT_TICKS_THRESHOLD = 20 * 10; // 10 seconds
+
     private static LiveControlConfig config;
-    private static boolean chatCommandsEnabled = true;
+    private static boolean chatCommandsEnabled = false;
     private static boolean cameraFollowsPlayerMovement = false;
     private static int previousHurtTime = 0;
     private static int chatBridgeWatchdogTicks = 0;
@@ -76,13 +81,29 @@ public final class LiveControlClient implements ClientModInitializer {
     private static int obstacleAvoidanceDirection = 1;
     private static int corneredTicks = 0;
     private static Vec3d previousCameraFollowPosition;
+    private static Float previousPitch = null;
     private static Boolean pendingAutoJumpEnabled;
     private static LiveControlCommands lastExecutedLiveChatCommand;
+    private static String[] lastExecutedLiveChatCommandMessages = new String[0];
     private static boolean rerunLastCommandAfterRespawn;
     private static boolean wasDead;
-    private static boolean pickaxeAutomationActive;
-    private static int pickaxeAutomationTicksRemaining;
-    private static int pickaxeAutomationRetryTicks;
+    private static boolean wasInWorld;
+    // breaking state when holding the break action for several ticks
+    private static boolean breakHolding = false;
+    private static int breakHoldTicks = 0;
+    private static BlockPos breakTargetPos = null;
+    private static Direction breakTargetFacing = null;
+    // eating state when consuming food
+    private static boolean eating = false;
+    private static int eatingTargetSlot = -1;
+    private static int eatingInitialCount = 0;
+    private static int eatingInitialFoodLevel = 0;
+    private static int eatingTicks = 0;
+    private static int previousSelectedSlotBeforeEating = -1;
+    private static boolean eatingStarted = false;
+    private static boolean eatingUsing = false;
+    private static int pitchTiltTicks = 0;
+
 
     @Override
     public void onInitializeClient() {
@@ -92,14 +113,155 @@ public final class LiveControlClient implements ClientModInitializer {
         ClientTickEvents.START_CLIENT_TICK.register(LiveControlClient::tickCombatAutomation);
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             applyPendingAutoJumpSetting(client);
+            tickBackOnJoin(client);
             tickAutoRespawn(client);
             tickCameraFollowMovement(client);
+            tickPitchRecentering(client);
             tickQueuedLiveChatCommands(client);
-            tickPickaxeAutomation(client);
+            tickBreakHolding(client);
+            tickEating(client);
+            // pickaxe automation removed
             LiveControlBossBar.tick();
             tickChatBridgeWatchdog();
         });
-        restartChatBridges();
+        // HUD overlay: small status under the bossbar.
+        HudRenderCallback.EVENT.register((DrawContext drawContext, float tickDelta) -> {
+            MinecraftClient client = MinecraftClient.getInstance();
+            if (client == null || client.inGameHud == null) return;
+            if (!LiveControlBossBar.isVisible()) return;
+
+            String text = "Chat control active";
+            int textWidth = client.textRenderer.getWidth(Text.literal(text));
+            int padding = 6;
+            int boxWidth = textWidth + padding * 2;
+            int boxHeight = client.textRenderer.fontHeight + padding;
+            int centerX = client.getWindow().getScaledWidth() / 2;
+            int left = centerX - boxWidth / 2;
+            int top = 28; // place underneath the boss bar (moved up a little)
+
+            // draw text with simple shadow using DrawContext
+            drawContext.drawText(client.textRenderer, Text.literal(text), left + padding + 1, top + (padding / 4) + 1, 0x000000, false);
+            drawContext.drawText(client.textRenderer, Text.literal(text), left + padding, top + (padding / 4), 0xFFFF00, true);
+        });
+        stopChatBridges();
+    }
+
+    // handle eating behavior each tick
+    private static void tickEating(MinecraftClient client) {
+        if (!eating) return;
+        if (client.player == null || client.interactionManager == null) {
+            eating = false;
+            eatingUsing = false;
+            eatingTargetSlot = -1;
+            eatingTicks = 0;
+            return;
+        }
+
+        // tickEating only handles progression of an already-started eating action
+
+        // if we haven't started using the item, select the slot and start using
+        if (!eatingStarted) {
+            int slot = findHotbarItemSlotWithFood(client.player);
+            if (slot < 0) {
+                // no food found: cancel eating and allow previous action to continue
+                eating = false;
+                eatingStarted = false;
+                eatingUsing = false;
+                eatingTargetSlot = -1;
+                eatingTicks = 0;
+                // re-run last executed command if present
+                rerunLastCommandIfAllowed(client);
+                return;
+            }
+            previousSelectedSlotBeforeEating = client.player.getInventory().selectedSlot;
+            client.player.getInventory().selectedSlot = slot;
+            if (client.player.networkHandler != null) {
+                client.player.networkHandler.sendPacket(new UpdateSelectedSlotC2SPacket(slot));
+            }
+            eatingTargetSlot = slot;
+            eatingInitialCount = client.player.getInventory().getStack(slot).getCount();
+            eatingStarted = true;
+            eatingTicks = 0;
+        }
+
+        // simulate holding use item by using interactItem
+        try {
+            client.interactionManager.interactItem(client.player, Hand.MAIN_HAND);
+        } catch (NoSuchMethodError | AbstractMethodError ignored) {
+            // fallback: just stop eating
+            eating = false;
+            eatingStarted = false;
+            eatingUsing = false;
+            eatingTargetSlot = -1;
+            eatingTicks = 0;
+            rerunLastCommandIfAllowed(client);
+            return;
+        }
+
+        eatingTicks++;
+
+        // if the item count decreased or player is no longer eating, consider finished
+        ItemStack stack = client.player.getInventory().getStack(eatingTargetSlot);
+        boolean finished = stack.isEmpty() || stack.getCount() < eatingInitialCount || !client.player.isUsingItem();
+        if (finished || eatingTicks > 20 * 10) { // guard: 10s max
+            eating = false;
+            eatingStarted = false;
+            eatingUsing = false;
+            eatingTargetSlot = -1;
+            eatingTicks = 0;
+            // restore previous slot
+            if (previousSelectedSlotBeforeEating >= 0 && client.player.getInventory().selectedSlot != previousSelectedSlotBeforeEating) {
+                client.player.getInventory().selectedSlot = previousSelectedSlotBeforeEating;
+                if (client.player.networkHandler != null) {
+                    client.player.networkHandler.sendPacket(new UpdateSelectedSlotC2SPacket(previousSelectedSlotBeforeEating));
+                }
+            }
+            // after eating, rerun the last non-#stop command if available
+            rerunLastCommandIfAllowed(client);
+        }
+    }
+
+    private static int findHotbarItemSlotWithFood(ClientPlayerEntity player) {
+        for (int slot = 0; slot < 9; slot++) {
+            ItemStack stack = player.getInventory().getStack(slot);
+            if (!stack.isEmpty() && isFoodItem(stack.getItem())) {
+                return slot;
+            }
+        }
+        return -1;
+    }
+
+    private static boolean isFoodItem(Item item) {
+        // use item tags or instance checks; simple check: edible items have food component
+        try {
+            return item.isFood();
+        } catch (NoSuchMethodError | AbstractMethodError ignored) {
+            return false;
+        }
+    }
+
+    public static void handleChatMessage(String message) {
+        String normalized = message == null ? "" : message.trim();
+        if (normalized.isBlank()) return;
+
+        String lower = normalized.toLowerCase(Locale.ROOT);
+        // open inventory
+        if (lower.equals("open inventory") || lower.equals("open") || lower.equals("inventory") || lower.equals("#openinv")) {
+            MinecraftClient client = MinecraftClient.getInstance();
+            client.execute(() -> {
+                if (client.player != null) {
+                    // open player's inventory screen directly
+                    client.setScreen(new net.minecraft.client.gui.screen.ingame.InventoryScreen(client.player));
+                }
+            });
+            return;
+        }
+
+        // delegate to enum-based matching for other simple commands
+        LiveControlCommands.fromChatMessage(message).ifPresent(command -> {
+            MinecraftClient client = MinecraftClient.getInstance();
+            client.execute(() -> runLiveChatCommand(command));
+        });
     }
 
     public static LiveControlConfig config() {
@@ -112,17 +274,37 @@ public final class LiveControlClient implements ClientModInitializer {
     public static void saveConfig(LiveControlConfig updatedConfig) {
         config = updatedConfig;
         config.save();
-        restartChatBridges();
+        if (chatCommandsEnabled) {
+            restartChatBridges();
+        } else {
+            stopChatBridges();
+        }
     }
 
     private static void restartChatBridges() {
+        if (!chatCommandsEnabled) {
+            stopChatBridges();
+            return;
+        }
         chatBridgeWatchdogTicks = 0;
         YOUTUBE_CHAT_BRIDGE.restart();
         TWITCH_CHAT_BRIDGE.restart();
         KICK_CHAT_BRIDGE.restart();
     }
 
+    private static void stopChatBridges() {
+        chatBridgeWatchdogTicks = 0;
+        YOUTUBE_CHAT_BRIDGE.stop();
+        TWITCH_CHAT_BRIDGE.stop();
+        KICK_CHAT_BRIDGE.stop();
+    }
+
     private static void tickChatBridgeWatchdog() {
+        if (!chatCommandsEnabled) {
+            stopChatBridges();
+            return;
+        }
+
         chatBridgeWatchdogTicks++;
         if (chatBridgeWatchdogTicks < CHAT_BRIDGE_WATCHDOG_INTERVAL_TICKS) {
             return;
@@ -138,8 +320,19 @@ public final class LiveControlClient implements ClientModInitializer {
         return chatCommandsEnabled;
     }
 
+    public static boolean shouldKeepFullFps() {
+        return chatCommandsEnabled || LiveControlBossBar.isVisible();
+    }
+
     public static void runLiveChatCommand(LiveControlCommands command) {
         MinecraftClient client = MinecraftClient.getInstance();
+        if (client == null) return;
+        // CLOSE should always execute immediately (no cooldown) and actually close the current screen
+        if (command == LiveControlCommands.CLOSE) {
+            client.execute(() -> executeLiveChatCommand(client, command, false));
+            return;
+        }
+
         if (client.player == null || client.getNetworkHandler() == null || !chatCommandsEnabled) {
             return;
         }
@@ -149,16 +342,67 @@ public final class LiveControlClient implements ClientModInitializer {
         if (now < nextAllowedTime) {
             long remainingSeconds = Math.max(1L, (nextAllowedTime - now + 999L) / 1000L);
             client.player.sendMessage(Text.literal("LiveControl command cooldown: wait " + remainingSeconds + "s."), true);
+            // Do not let queued chat from an attempted command leak through while on cooldown.
+            cancelQueuedLiveChatCommands();
             return;
         }
+
+        // command will run: stop any current queued actions and break/eating state
+        if (client.player != null && client.getNetworkHandler() != null) {
+            sendMinecraftChatMessage(client, "#stop");
+        }
+        cancelQueuedLiveChatCommands();
+        // cancel any in-progress break-hold or eating when a new command starts
+        breakHolding = false;
+        breakHoldTicks = 0;
+        breakTargetPos = null;
+        breakTargetFacing = null;
+        eating = false;
+        eatingStarted = false;
+        eatingTargetSlot = -1;
+        eatingTicks = 0;
 
         lastLiveChatCommandTime = now;
         executeLiveChatCommand(client, command, true);
     }
 
     private static void executeLiveChatCommand(MinecraftClient client, LiveControlCommands command, boolean rememberCommand) {
-        if (command == LiveControlCommands.PICKAXE) {
-            startPickaxeAutomation(client, rememberCommand);
+        // handle direct-action commands
+        if (command == LiveControlCommands.JUMP) {
+            if (client.player != null) {
+                client.player.jump();
+                client.player.sendMessage(Text.literal("LiveControl performed a jump."), true);
+            }
+            return;
+        }
+        if (command == LiveControlCommands.OPEN_INVENTORY) {
+            client.execute(() -> {
+                if (client.player != null) {
+                    client.setScreen(new net.minecraft.client.gui.screen.ingame.InventoryScreen(client.player));
+                }
+            });
+            return;
+        }
+        if (command == LiveControlCommands.BREAK) {
+            // Hold break for several ticks to actually break the block.
+            if (client.player != null && client.interactionManager != null) {
+                breakHolding = true;
+                breakHoldTicks = 0;
+                breakTargetPos = client.player.getBlockPos().offset(client.player.getHorizontalFacing());
+                breakTargetFacing = client.player.getHorizontalFacing();
+                client.player.sendMessage(Text.literal("LiveControl starting to break the block in front (holding for 4s)..."), true);
+            }
+            return;
+        }
+
+        if (command == LiveControlCommands.CLOSE) {
+            // Close the current open screen (inventory, chest, chat, etc.) instead of sending a chat fallback.
+            if (client.currentScreen != null) {
+                client.setScreen(null);
+                if (client.player != null) {
+                    client.player.sendMessage(Text.literal("LiveControl closed the current screen."), true);
+                }
+            }
             return;
         }
 
@@ -166,6 +410,9 @@ public final class LiveControlClient implements ClientModInitializer {
         queueLiveChatCommands(commandMessages);
         if (rememberCommand && containsNonStopCommand(commandMessages)) {
             lastExecutedLiveChatCommand = command;
+            lastExecutedLiveChatCommandMessages = Arrays.stream(commandMessages)
+                    .filter(m -> !"#stop".equalsIgnoreCase(m.trim()))
+                    .toArray(String[]::new);
         }
         String feedback = commandMessages.length == 1
                 ? commandMessages[0]
@@ -185,6 +432,18 @@ public final class LiveControlClient implements ClientModInitializer {
                         }
                         setAutoJumpEnabled(visible);
                         LiveControlBossBar.setVisible(visible);
+                        if (visible) {
+                            restartChatBridges();
+                        } else {
+                            stopChatBridges();
+                        }
+                        if (context.getSource().getPlayer() != null) {
+                            MinecraftClient mc = MinecraftClient.getInstance();
+                            if (mc != null && mc.getNetworkHandler() != null) {
+                                mc.getNetworkHandler().sendChatMessage("#set renderPath false");
+                                mc.getNetworkHandler().sendChatMessage("#set renderGoal false");
+                            }
+                        }
                         context.getSource().sendFeedback(Text.literal(
                                 visible
                                         ? "LiveControl AFK boss bar, chat commands, and movement camera follow enabled."
@@ -208,15 +467,48 @@ public final class LiveControlClient implements ClientModInitializer {
         previousCameraFollowPosition = null;
         setAutoJumpEnabled(false);
         LiveControlBossBar.setVisible(false);
+        stopChatBridges();
         cancelQueuedLiveChatCommands();
         rerunLastCommandAfterRespawn = false;
+        // stop any automated attack/mob state and pickaxe automation; clear movement keys so the player regains control
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (client != null) {
+            if (client.player != null) {
+                stopMovement(client, client.player);
+            }
+            if (client.currentScreen != null) {
+                client.setScreen(null);
+            }
+        }
+        attackTarget = null;
+        runningFromMobs = false;
+        obstacleAvoidanceTicks = 0;
+        corneredTicks = 0;
         sendMinecraftChatMessage("#stop");
+    }
+
+    private static void tickBackOnJoin(MinecraftClient client) {
+        boolean inWorld = client != null && client.player != null && client.getNetworkHandler() != null && client.world != null;
+        if (inWorld && !wasInWorld) {
+            goBack();
+        }
+        wasInWorld = inWorld;
     }
 
     private static void tickCombatAutomation(MinecraftClient client) {
         ClientPlayerEntity player = client.player;
         if (player == null) {
             previousHurtTime = 0;
+            attackTarget = null;
+            runningFromMobs = false;
+            obstacleAvoidanceTicks = 0;
+            corneredTicks = 0;
+            return;
+        }
+
+        // If chat commands are disabled (for example via /back), disable combat/mob automation
+        if (!chatCommandsEnabled) {
+            previousHurtTime = player.hurtTime;
             attackTarget = null;
             runningFromMobs = false;
             obstacleAvoidanceTicks = 0;
@@ -238,7 +530,13 @@ public final class LiveControlClient implements ClientModInitializer {
             }
         }
 
-        tickMobEscape(client, player);
+        // Instead of running away from mobs, begin attack when a hostile is nearby
+        if (attackTarget == null) {
+            HostileEntity nearest = nearestHostileMob(player, MOB_RUN_START_DISTANCE);
+            if (nearest != null) {
+                beginAutoFight(nearest);
+            }
+        }
     }
 
     private static void tickAutoRespawn(MinecraftClient client) {
@@ -250,7 +548,7 @@ public final class LiveControlClient implements ClientModInitializer {
 
         boolean dead = !player.isAlive() || player.getHealth() <= 0.0F;
         if (dead) {
-            if (!wasDead && chatCommandsEnabled && lastExecutedLiveChatCommand != null) {
+            if (!wasDead && chatCommandsEnabled && isRunnableCommand(lastExecutedLiveChatCommand)) {
                 rerunLastCommandAfterRespawn = true;
             }
             wasDead = true;
@@ -261,11 +559,18 @@ public final class LiveControlClient implements ClientModInitializer {
             return;
         }
 
-        if (wasDead && rerunLastCommandAfterRespawn && chatCommandsEnabled && lastExecutedLiveChatCommand != null) {
+        if (wasDead && rerunLastCommandAfterRespawn && chatCommandsEnabled) {
             rerunLastCommandAfterRespawn = false;
-            executeLiveChatCommand(client, lastExecutedLiveChatCommand, false);
+            if (isRunnableCommand(lastExecutedLiveChatCommand)) {
+                executeLiveChatCommand(client, lastExecutedLiveChatCommand, false);
+            }
         }
         wasDead = false;
+    }
+
+    private static boolean isRunnableCommand(LiveControlCommands command) {
+        if (command == null) return false;
+        return containsNonStopCommand(command.chatCommands());
     }
 
     private static void tickCameraFollowMovement(MinecraftClient client) {
@@ -285,6 +590,42 @@ public final class LiveControlClient implements ClientModInitializer {
         previousCameraFollowPosition = currentPosition;
     }
 
+    private static void tickPitchRecentering(MinecraftClient client) {
+        ClientPlayerEntity player = client.player;
+        if (player == null || !chatCommandsEnabled) {
+            previousPitch = null;
+            pitchTiltTicks = 0;
+            return;
+        }
+
+        float pitch = player.getPitch();
+        if (previousPitch == null) {
+            previousPitch = pitch;
+            pitchTiltTicks = 0;
+            return;
+        }
+
+        float delta = Math.abs(pitch - previousPitch);
+        if (Math.abs(pitch) > PITCH_TILT_THRESHOLD_DEGREES && delta < 0.5F) {
+            // head remains tilted beyond threshold and fairly stable
+            pitchTiltTicks++;
+        } else {
+            pitchTiltTicks = 0;
+        }
+
+        previousPitch = pitch;
+
+        if (pitchTiltTicks >= PITCH_TILT_TICKS_THRESHOLD) {
+            // recenter pitch (only up/down), keep yaw the same
+            player.setPitch(0.0F);
+            if (client.player != null) {
+                client.player.sendMessage(Text.literal("LiveControl recentred head pitch."), true);
+            }
+            pitchTiltTicks = 0;
+            previousPitch = player.getPitch();
+        }
+    }
+
     private static Entity getAttacker(ClientPlayerEntity player) {
         DamageSource damageSource = player.getRecentDamageSource();
         if (damageSource != null && damageSource.getAttacker() != null) {
@@ -295,6 +636,10 @@ public final class LiveControlClient implements ClientModInitializer {
 
     private static boolean tickAttackTarget(MinecraftClient client, ClientPlayerEntity player) {
         if (!isValidAttackTarget(player, attackTarget)) {
+            // if the target died while we were attacking, re-run the last non-#stop command
+            if (attackTarget instanceof LivingEntity living && (!living.isAlive() || living.getHealth() <= 0.0F)) {
+                rerunLastCommandIfAllowed(client);
+            }
             attackTarget = null;
             stopMovement(client, player);
             return false;
@@ -312,7 +657,12 @@ public final class LiveControlClient implements ClientModInitializer {
         if (squaredDistance > ATTACK_REACH_DISTANCE * ATTACK_REACH_DISTANCE) {
             moveForward(client, player, true);
         } else {
+            // in melee range: attempt crits by spamming jump and attacking when cooldown ready
+            // ensure movement is stopped to better land crits
             stopMovement(client, player);
+            // spam jump to attempt critical hits but only when on the ground
+            if (player != null && player.isOnGround()) player.jump();
+            // if attack cooldown is ready, perform attack
             if (client.interactionManager != null && player.getAttackCooldownProgress(0.0F) >= 1.0F) {
                 client.interactionManager.attackEntity(player, attackTarget);
                 player.swingHand(Hand.MAIN_HAND);
@@ -512,82 +862,7 @@ public final class LiveControlClient implements ClientModInitializer {
     }
 
 
-    private static void startPickaxeAutomation(MinecraftClient client, boolean rememberCommand) {
-        cancelQueuedLiveChatCommands();
-        pickaxeAutomationActive = true;
-        pickaxeAutomationTicksRemaining = PICKAXE_AUTOMATION_TIMEOUT_TICKS;
-        pickaxeAutomationRetryTicks = 0;
-        if (rememberCommand) {
-            lastExecutedLiveChatCommand = LiveControlCommands.PICKAXE;
-        }
-        client.player.sendMessage(Text.literal("LiveControl is crafting a wooden pickaxe with the mod."), true);
-    }
 
-    private static void tickPickaxeAutomation(MinecraftClient client) {
-        if (!pickaxeAutomationActive || client.player == null || client.interactionManager == null || client.world == null) {
-            return;
-        }
-
-        ClientPlayerEntity player = client.player;
-        if (hasItem(player, Items.WOODEN_PICKAXE) || hasPickaxe(player)) {
-            pickaxeAutomationActive = false;
-            player.sendMessage(Text.literal("LiveControl pickaxe ready."), true);
-            return;
-        }
-
-        if (pickaxeAutomationTicksRemaining-- <= 0) {
-            pickaxeAutomationActive = false;
-            player.sendMessage(Text.literal("LiveControl could not craft a pickaxe. Add wood or open/place a crafting table nearby."), true);
-            return;
-        }
-
-        if (pickaxeAutomationRetryTicks-- > 0) {
-            return;
-        }
-        pickaxeAutomationRetryTicks = PICKAXE_AUTOMATION_RETRY_TICKS;
-
-        if (player.currentScreenHandler instanceof CraftingScreenHandler) {
-            craftWoodenPickaxeAtTable(client, player);
-            return;
-        }
-
-        if (openNearbyCraftingTable(client, player)) {
-            return;
-        }
-
-        if (!hasItem(player, Items.CRAFTING_TABLE)) {
-            craftInventoryPrerequisites(client, player);
-            return;
-        }
-
-        placeCraftingTable(client, player);
-    }
-
-    private static void craftWoodenPickaxeAtTable(MinecraftClient client, ClientPlayerEntity player) {
-        if (countTagged(player, ItemTags.PLANKS) < 3) {
-            tryCraftTaggedOutput(client, player.currentScreenHandler, ItemTags.PLANKS);
-            return;
-        }
-        if (countItem(player, Items.STICK) < 2) {
-            tryCraftItem(client, player.currentScreenHandler, Items.STICK);
-            return;
-        }
-        tryCraftItem(client, player.currentScreenHandler, Items.WOODEN_PICKAXE);
-    }
-
-    private static void craftInventoryPrerequisites(MinecraftClient client, ClientPlayerEntity player) {
-        ScreenHandler handler = player.currentScreenHandler;
-        if (!(handler instanceof PlayerScreenHandler)) {
-            player.sendMessage(Text.literal("LiveControl needs the normal inventory or a crafting table to craft a pickaxe."), true);
-            return;
-        }
-
-        if (countTagged(player, ItemTags.PLANKS) < 4) {
-            tryCraftTaggedOutput(client, handler, ItemTags.PLANKS);
-            return;
-        }
-        tryCraftItem(client, handler, Items.CRAFTING_TABLE);
-    }
 
     private static boolean tryCraftItem(MinecraftClient client, ScreenHandler handler, Item item) {
         return tryCraftRecipe(client, handler, recipe -> recipe.getOutput(client.world.getRegistryManager()).isOf(item));
@@ -746,6 +1021,70 @@ public final class LiveControlClient implements ClientModInitializer {
         String message = queuedLiveChatCommands.poll();
         sendMinecraftChatMessage(client, message);
         queuedLiveChatCommandTicks = COMMAND_SEQUENCE_DELAY_TICKS;
+    }
+
+    // handle break-holding behavior each tick
+    private static void tickBreakHolding(MinecraftClient client) {
+        if (!breakHolding) return;
+        if (client.player == null || client.interactionManager == null || breakTargetPos == null || breakTargetFacing == null) {
+            breakHolding = false;
+            breakHoldTicks = 0;
+            breakTargetPos = null;
+            breakTargetFacing = null;
+            return;
+        }
+
+        // If player moved away from the target, cancel
+        if (!client.player.getBlockPos().offset(client.player.getHorizontalFacing()).equals(breakTargetPos)) {
+            // allow small mismatch, but if too far reset
+        }
+
+        // continue sending attackBlock to hold breaking
+        try {
+            client.interactionManager.attackBlock(breakTargetPos, breakTargetFacing);
+        } catch (NoSuchMethodError | AbstractMethodError ignored) {
+            // fallback: send chat fallback once and cancel
+            sendMinecraftChatMessage(client, "#break");
+            breakHolding = false;
+            breakHoldTicks = 0;
+            breakTargetPos = null;
+            breakTargetFacing = null;
+            return;
+        }
+        breakHoldTicks++;
+        client.player.swingHand(Hand.MAIN_HAND);
+
+        if (breakHoldTicks >= BREAK_HOLD_TICKS_REQUIRED) {
+            // finished breaking attempt
+            if (client.player != null) client.player.sendMessage(Text.literal("LiveControl finished breaking."), true);
+            breakHolding = false;
+            breakHoldTicks = 0;
+            breakTargetPos = null;
+            breakTargetFacing = null;
+        }
+    }
+
+    private static void queueLastExecutedMessages() {
+        cancelQueuedLiveChatCommands();
+        if (lastExecutedLiveChatCommandMessages != null && lastExecutedLiveChatCommandMessages.length > 0) {
+            queuedLiveChatCommands.addAll(Arrays.asList(lastExecutedLiveChatCommandMessages));
+            queuedLiveChatCommandTicks = 0;
+            // trigger immediately on the next tick
+            tickQueuedLiveChatCommands(MinecraftClient.getInstance());
+        }
+    }
+
+    private static void rerunLastCommandIfAllowed(MinecraftClient client) {
+        if (client == null || client.player == null || client.getNetworkHandler() == null) {
+            return;
+        }
+        if (!chatCommandsEnabled) {
+            return;
+        }
+        if (!isRunnableCommand(lastExecutedLiveChatCommand)) {
+            return;
+        }
+        queueLastExecutedMessages();
     }
 
     private static void queueLiveChatCommands(String[] messages) {

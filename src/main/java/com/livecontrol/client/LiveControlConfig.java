@@ -17,6 +17,8 @@ public final class LiveControlConfig {
     public boolean youtubeIntegrationEnabled = false;
     public String youtubeApiKey = "";
     public String youtubeLiveChatId = "";
+    public String youtubeStreamUrl = "";
+    public String youtubeStreamUrl2 = "";
     public boolean twitchIntegrationEnabled = false;
     public String twitchChannel = "";
     public boolean kickIntegrationEnabled = false;
@@ -52,8 +54,7 @@ public final class LiveControlConfig {
 
     public boolean isReadyForYoutube() {
         return youtubeIntegrationEnabled
-                && !youtubeApiKey.isBlank()
-                && !youtubeLiveChatId.isBlank();
+                && (!youtubeStreamUrl.isBlank() || !youtubeStreamUrl2.isBlank() || !youtubeLiveChatId.isBlank());
     }
 
     public boolean isReadyForTwitch() {
@@ -65,12 +66,25 @@ public final class LiveControlConfig {
     }
 
     private static String sanitizeChannel(String value) {
-        return value == null ? "" : value.trim().replaceFirst("^@", "");
+        if (value == null) {
+            return "";
+        }
+
+        String sanitized = value.trim().replaceFirst("^@", "");
+        int queryStart = sanitized.indexOf('?');
+        if (queryStart >= 0) {
+            sanitized = sanitized.substring(0, queryStart);
+        }
+        sanitized = sanitized.replaceFirst("/+$", "");
+        int slash = sanitized.lastIndexOf('/');
+        return slash >= 0 ? sanitized.substring(slash + 1).replaceFirst("^@", "") : sanitized;
     }
 
     private LiveControlConfig sanitized() {
         youtubeApiKey = youtubeApiKey == null ? "" : youtubeApiKey.trim();
         youtubeLiveChatId = youtubeLiveChatId == null ? "" : youtubeLiveChatId.trim();
+        youtubeStreamUrl = youtubeStreamUrl == null ? "" : youtubeStreamUrl.trim();
+        youtubeStreamUrl2 = youtubeStreamUrl2 == null ? "" : youtubeStreamUrl2.trim();
         twitchChannel = sanitizeChannel(twitchChannel);
         kickChannel = sanitizeChannel(kickChannel);
         pollSeconds = Math.max(2, Math.min(60, pollSeconds));

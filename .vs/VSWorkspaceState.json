@@ -1,0 +1,13 @@
+{
+  "ExpandedNodes": [
+    "",
+    "\\src",
+    "\\src\\main",
+    "\\src\\main\\java",
+    "\\src\\main\\java\\com",
+    "\\src\\main\\java\\com\\livecontrol",
+    "\\src\\main\\java\\com\\livecontrol\\client"
+  ],
+  "SelectedNode": "\\src\\main\\java\\com\\livecontrol\\client\\LiveControlCommands.java",
+  "PreviewInSolutionExplorer": false
+}

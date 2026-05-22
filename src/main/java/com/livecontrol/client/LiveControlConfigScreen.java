@@ -12,8 +12,8 @@ public final class LiveControlConfigScreen extends Screen {
     private static final int FIELD_HEIGHT = 20;
 
     private final Screen parent;
-    private TextFieldWidget apiKeyField;
-    private TextFieldWidget liveChatIdField;
+    private TextFieldWidget youtubeUrlField;
+    private TextFieldWidget youtubeUrl2Field;
     private TextFieldWidget twitchChannelField;
     private TextFieldWidget kickChannelField;
     private TextFieldWidget pollSecondsField;
@@ -36,15 +36,15 @@ public final class LiveControlConfigScreen extends Screen {
         int startY = 24;
         LiveControlConfig config = LiveControlClient.config();
 
-        apiKeyField = new TextFieldWidget(textRenderer, centerX - FIELD_WIDTH / 2, startY + 28, FIELD_WIDTH, FIELD_HEIGHT, Text.literal("YouTube API Key"));
-        apiKeyField.setMaxLength(256);
-        apiKeyField.setText(config.youtubeApiKey);
-        addDrawableChild(apiKeyField);
+        youtubeUrlField = new TextFieldWidget(textRenderer, centerX - FIELD_WIDTH / 2, startY + 28, FIELD_WIDTH, FIELD_HEIGHT, Text.literal("YouTube Stream URL"));
+        youtubeUrlField.setMaxLength(512);
+        youtubeUrlField.setText(config.youtubeStreamUrl.isBlank() ? config.youtubeLiveChatId : config.youtubeStreamUrl);
+        addDrawableChild(youtubeUrlField);
 
-        liveChatIdField = new TextFieldWidget(textRenderer, centerX - FIELD_WIDTH / 2, startY + 62, FIELD_WIDTH, FIELD_HEIGHT, Text.literal("YouTube Live Chat ID"));
-        liveChatIdField.setMaxLength(256);
-        liveChatIdField.setText(config.youtubeLiveChatId);
-        addDrawableChild(liveChatIdField);
+        youtubeUrl2Field = new TextFieldWidget(textRenderer, centerX - FIELD_WIDTH / 2, startY + 62, FIELD_WIDTH, FIELD_HEIGHT, Text.literal("Second YouTube Stream URL"));
+        youtubeUrl2Field.setMaxLength(512);
+        youtubeUrl2Field.setText(config.youtubeStreamUrl2);
+        addDrawableChild(youtubeUrl2Field);
 
         twitchChannelField = new TextFieldWidget(textRenderer, centerX - FIELD_WIDTH / 2, startY + 96, FIELD_WIDTH, FIELD_HEIGHT, Text.literal("Twitch Channel"));
         twitchChannelField.setMaxLength(64);
@@ -91,8 +91,8 @@ public final class LiveControlConfigScreen extends Screen {
         int startY = 24;
 
         context.drawCenteredTextWithShadow(textRenderer, title, centerX, startY - 14, 0xFFFFFFFF);
-        context.drawTextWithShadow(textRenderer, "YouTube Data API key", centerX - FIELD_WIDTH / 2, startY + 16, 0xFFA0FFFF);
-        context.drawTextWithShadow(textRenderer, "YouTube live chat ID", centerX - FIELD_WIDTH / 2, startY + 50, 0xFFA0FFFF);
+        context.drawTextWithShadow(textRenderer, "YouTube stream URL", centerX - FIELD_WIDTH / 2, startY + 16, 0xFFA0FFFF);
+        context.drawTextWithShadow(textRenderer, "Second YouTube stream URL", centerX - FIELD_WIDTH / 2, startY + 50, 0xFFA0FFFF);
         context.drawTextWithShadow(textRenderer, "Twitch channel", centerX - FIELD_WIDTH / 2, startY + 84, 0xFFA0FFFF);
         context.drawTextWithShadow(textRenderer, "Kick channel", centerX - FIELD_WIDTH / 2, startY + 118, 0xFFA0FFFF);
         context.drawTextWithShadow(textRenderer, "Poll interval, 2-60 seconds", centerX - FIELD_WIDTH / 2, startY + 152, 0xFFA0FFFF);
@@ -126,8 +126,8 @@ public final class LiveControlConfigScreen extends Screen {
     private void saveAndClose() {
         LiveControlConfig config = new LiveControlConfig();
         config.youtubeIntegrationEnabled = youtubeEnabled;
-        config.youtubeApiKey = apiKeyField.getText();
-        config.youtubeLiveChatId = liveChatIdField.getText();
+        config.youtubeStreamUrl = youtubeUrlField.getText();
+        config.youtubeStreamUrl2 = youtubeUrl2Field.getText();
         config.twitchIntegrationEnabled = twitchEnabled;
         config.twitchChannel = twitchChannelField.getText();
         config.kickIntegrationEnabled = kickEnabled;

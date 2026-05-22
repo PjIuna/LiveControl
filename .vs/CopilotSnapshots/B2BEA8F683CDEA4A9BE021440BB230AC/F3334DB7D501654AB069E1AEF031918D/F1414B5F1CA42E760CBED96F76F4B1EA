@@ -1,0 +1,25 @@
+﻿{
+  "schemaVersion": 1,
+  "id": "livecontrol",
+  "version": "${version}",
+  "name": "LiveControl",
+  "description": "Client-side AFK boss bar and YouTube chat command bridge for Minecraft live streams.",
+  "authors": ["LiveControl"],
+  "contact": {},
+  "license": "MIT",
+  "environment": "client",
+  "entrypoints": {
+    "client": [
+      "com.livecontrol.client.LiveControlClient"
+    ]
+  },
+  "mixins": [
+    "livecontrol.mixins.json"
+  ],
+  "depends": {
+    "fabricloader": ">=0.16.0",
+    "minecraft": "~1.20.1",
+    "java": ">=17",
+    "fabric-api": "*"
+  }
+}
