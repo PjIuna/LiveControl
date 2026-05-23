@@ -1,64 +1,87 @@
 # LiveControl
 
-LiveControl is a Minecraft mod that allows your livestream chat to control your player while you are AFK.
+Control your Minecraft player directly from livestream chat while AFK.
 
-Connect a **YouTube**, **Kick**, or **Twitch** channel to your Minecraft client and let your viewers interact with your gameplay in real time.
+LiveControl allows creators to connect their **YouTube**, **Twitch**, or **Kick** livestream chat directly to Minecraft, letting viewers interact with and control the player while the streamer is away.
 
-When you need to step away, simply use:
+---
+
+## ✨ Features
+
+* YouTube Live chat support
+* Twitch chat support
+* Kick chat support
+* AFK mode system
+* Chat-controlled movement & actions
+* Baritone-assisted mining and farming
+* Designed for livestream interaction & chaos
+
+---
+
+## 📺 How It Works
+
+When you're going AFK, type:
 
 ```mcfunction
 /afk
 ```
 
-This enables chat control mode and allows your livestream chat to control your character while you are away.
+This enables livestream chat control.
 
-When you return, use:
+While AFK, viewers can control your player directly through livestream chat using the commands below.
+
+### 💬 Viewer Chat Commands
+
+| Chat Command | Action                                                |
+| ------------ | ----------------------------------------------------- |
+| `Stone`      | Mines stone                                           |
+| `Wood`       | Collects wood                                         |
+| `Jump`       | Makes the player jump                                 |
+| `Inventory`  | Opens inventory                                       |
+| `Explore`    | Explores the area                                     |
+| `Loot`       | Searches for loot                                     |
+| `Farm`       | Starts farming                                        |
+| `Nether`     | Travel in and out of the Nether                       |
+| `Gold`       | **Nether-only command** that mines gold in the Nether |
+| `Home`       | Returns home                                          |
+| `Close`      | Stops current task and returns nearby                 |
+| `Stop`       | Completely stops all actions                          |
+- 💡 You can use the #sethome command to set homes for the Home chat command.
+
+
+When you return, type:
 
 ```mcfunction
 /back
 ```
 
-This disables chat control and returns full control back to you.
+This disables livestream chat control and gives control back to you.
 
 ---
 
-# Features
+## ⚠️ Baritone Required
 
-* YouTube Live chat integration
-* Twitch chat integration
-* Kick chat integration
-* AFK mode with `/afk`
-* Resume gameplay with `/back`
-* Chat-controlled movement and actions
-* Baritone-assisted mining and farming
-* Designed for livestream interaction and entertainment
+> **Baritone is REQUIRED for this mod to function properly.**
+
+LiveControl depends on Baritone for pathfinding, mining, and automated movement systems used while chat is controlling the player.
+
+Without Baritone installed, the mod will not work correctly.
 
 ---
 
-# Requirements
+## ⚠️ Important Warning
 
-## Required Mods
+This mod is **NOT** intended for cheating or abuse.
 
-* **Baritone** *(REQUIRED)*
+Do **NOT** use this on large or public multiplayer servers.
 
-LiveControl depends on Baritone for movement, mining, and farming functionality while chat is controlling the player.
-
-The mod will NOT function properly without Baritone installed.
-
----
-
-# Important Information
-
-⚠️ **This mod is NOT intended for cheating or abuse.**
-
-Do **NOT** use this on large or popular multiplayer servers.
-
-This mod is intended for:
+This mod was created for:
 
 * Singleplayer
 * Private SMPs
-* Small friend servers
-* Stream interaction content
+* Friend servers
+* Viewer interaction streams
+* AFK farming entertainment
 
 Using this mod on public servers may result in:
 
@@ -66,26 +89,36 @@ Using this mod on public servers may result in:
 * Kicks
 * Punishments from server staff
 
-The "Auto Mine" functionality exists only to help livestream chat interact with gameplay while the user is AFK.
+The Auto Mine functionality only exists to help livestream chat interact with gameplay while the player is AFK.
 
 ---
 
-# Disclaimer
+## ❗ Disclaimer
 
-Whatever you choose to do with this mod is **AT YOUR OWN RISK.**
+Everything you do with this mod is **AT YOUR OWN RISK.**
 
 The developers of LiveControl are **not responsible** for:
 
 * Server bans
 * Punishments
 * Misuse of the mod
-* Damage caused by improper use
+* Damage caused by improper usage
 
 Use responsibly.
 
 ---
 
-# Commands
+## 🛠 Installation
+
+1. Install Fabric Loader
+2. Install Fabric API
+3. Install Baritone from the linked GitHub
+4. Download LiveControl through GitHub or Modrinth
+5. Launch Minecraft
+
+---
+
+## 💬 Mod Commands
 
 | Command | Description                      |
 | ------- | -------------------------------- |
@@ -94,38 +127,8 @@ Use responsibly.
 
 ---
 
-# Supported Platforms
+## 🌎 Supported Platforms
 
 * YouTube Live
 * Twitch
 * Kick
-
----
-
-# Recommended Usage
-
-LiveControl works best for:
-
-* AFK farming streams
-* Viewer interaction events
-* Chaos challenge streams
-* Private SMP fun
-* Community livestreams
-
----
-
-# Installation
-
-1. Install Minecraft Fabric
-2. Install Fabric API
-3. Install Baritone
-4. Place LiveControl into your `mods` folder
-5. Launch Minecraft
-
----
-
-# Warning
-
-This mod gives external livestream chat influence over your Minecraft character.
-
-Only use it in environments where automation and viewer interaction are allowed.
