@@ -3,7 +3,12 @@ package com.livecontrol.client;
 import com.mojang.brigadier.Command;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.rendering.v1.HudRenderCallback;
+import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderEvents;
 import net.minecraft.client.gui.DrawContext;
+import net.minecraft.client.render.RenderLayer;
+import net.minecraft.client.render.VertexConsumer;
+import net.minecraft.client.render.WorldRenderer;
+import net.minecraft.client.util.math.MatrixStack;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandManager;
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
@@ -30,21 +35,29 @@ import net.minecraft.screen.ScreenHandler;
 import net.minecraft.screen.slot.SlotActionType;
 import net.minecraft.text.Text;
 import net.minecraft.util.Hand;
+import net.minecraft.util.hit.HitResult;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.World;
+import net.minecraft.world.RaycastContext;
 import net.minecraft.block.Blocks;
+import net.minecraft.block.BedBlock;
+import net.minecraft.block.BlockState;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Locale;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Queue;
+import java.util.Set;
+import java.util.UUID;
 
 public final class LiveControlClient implements ClientModInitializer {
     public static final String MOD_ID = "livecontrol";
@@ -60,6 +73,7 @@ public final class LiveControlClient implements ClientModInitializer {
     private static final double MOB_RUN_START_DISTANCE = 8.0D;
     private static final double MOB_RUN_STOP_DISTANCE = 12.0D;
     private static final double MOB_CORNERED_ATTACK_DISTANCE = 4.5D;
+    private static final int ATTACK_BLOCKED_CANCEL_TICKS = 20 * 2;
     private static final int COMMAND_SEQUENCE_DELAY_TICKS = 25;
     private static final int OBSTACLE_AVOIDANCE_TICKS = 12;
     private static final int CORNERED_ATTACK_TICKS = 10;
@@ -67,6 +81,16 @@ public final class LiveControlClient implements ClientModInitializer {
     private static final int BREAK_HOLD_TICKS_REQUIRED = 20 * 4; // 4 seconds
     private static final float PITCH_TILT_THRESHOLD_DEGREES = 10.0F;
     private static final int PITCH_TILT_TICKS_THRESHOLD = 20 * 10; // 10 seconds
+    private static final double SAFE_ZONE_RADIUS = 20.0D;
+    private static final int SAFE_ZONE_STOP_COOLDOWN_TICKS = 20 * 3;
+    private static final int SAFE_ZONE_ESCAPE_MEMORY_TICKS = 20 * 8;
+    private static final double SAFE_ZONE_CLEAR_MARGIN = 8.0D;
+    private static final int LOW_HUNGER_FOOD_LEVEL = 6;
+    private static final int SLEEP_BED_SEARCH_RADIUS = 200;
+    private static final double SLEEP_BED_INTERACT_DISTANCE = 3.5D;
+    private static final int SAFE_ZONE_MAX_DESCENT_DROP = 3;
+    private static final int SAFE_ZONE_ESCAPE_LOOKAHEAD_BLOCKS = 16;
+    private static final int SAFE_ZONE_RENDER_DISTANCE = 50;
 
     private static LiveControlConfig config;
     private static boolean chatCommandsEnabled = false;
@@ -75,6 +99,7 @@ public final class LiveControlClient implements ClientModInitializer {
     private static int chatBridgeWatchdogTicks = 0;
     private static long lastLiveChatCommandTime = 0L;
     private static Entity attackTarget;
+    private static int attackBlockedTicks = 0;
     private static boolean runningFromMobs = false;
     private static final Queue<String> queuedLiveChatCommands = new ArrayDeque<>();
     private static int queuedLiveChatCommandTicks = 0;
@@ -105,6 +130,12 @@ public final class LiveControlClient implements ClientModInitializer {
     private static boolean eatingStarted = false;
     private static boolean eatingUsing = false;
     private static int pitchTiltTicks = 0;
+    private static int safeZoneStopCooldownTicks = 0;
+    private static int safeZoneEscapeMemoryTicks = 0;
+    private static final Set<String> safeZoneEscapeClusterIds = new HashSet<>();
+    private static BlockPos pendingSleepBedPos = null;
+    private static boolean sleepPathStarted = false;
+    private static boolean safeZonesVisible = false;
 
 
     @Override
@@ -120,6 +151,8 @@ public final class LiveControlClient implements ClientModInitializer {
             tickAutoRespawn(client);
             tickCameraFollowMovement(client);
             tickPitchRecentering(client);
+            tickAfkHungerSafety(client);
+            tickSleepAutomation(client);
             tickQueuedLiveChatCommands(client);
             tickBreakHolding(client);
             tickEating(client);
@@ -146,6 +179,7 @@ public final class LiveControlClient implements ClientModInitializer {
             drawContext.drawText(client.textRenderer, Text.literal(text), left + padding + 1, top + (padding / 4) + 1, 0x000000, false);
             drawContext.drawText(client.textRenderer, Text.literal(text), left + padding, top + (padding / 4), 0xFFFF00, true);
         });
+        WorldRenderEvents.LAST.register(LiveControlClient::renderSafeZones);
         stopChatBridges();
     }
 
@@ -166,6 +200,9 @@ public final class LiveControlClient implements ClientModInitializer {
         if (!eatingStarted) {
             int slot = findHotbarItemSlotWithFood(client.player);
             if (slot < 0) {
+                slot = moveFoodToHotbar(client, client.player);
+            }
+            if (slot < 0) {
                 // no food found: cancel eating and allow previous action to continue
                 eating = false;
                 eatingStarted = false;
@@ -183,15 +220,18 @@ public final class LiveControlClient implements ClientModInitializer {
             }
             eatingTargetSlot = slot;
             eatingInitialCount = client.player.getInventory().getStack(slot).getCount();
+            eatingInitialFoodLevel = client.player.getHungerManager().getFoodLevel();
             eatingStarted = true;
             eatingTicks = 0;
         }
 
         // simulate holding use item by using interactItem
         try {
+            client.options.useKey.setPressed(true);
             client.interactionManager.interactItem(client.player, Hand.MAIN_HAND);
         } catch (NoSuchMethodError | AbstractMethodError ignored) {
             // fallback: just stop eating
+            client.options.useKey.setPressed(false);
             eating = false;
             eatingStarted = false;
             eatingUsing = false;
@@ -205,8 +245,11 @@ public final class LiveControlClient implements ClientModInitializer {
 
         // if the item count decreased or player is no longer eating, consider finished
         ItemStack stack = client.player.getInventory().getStack(eatingTargetSlot);
-        boolean finished = stack.isEmpty() || stack.getCount() < eatingInitialCount || !client.player.isUsingItem();
+        boolean finished = stack.isEmpty()
+                || stack.getCount() < eatingInitialCount
+                || client.player.getHungerManager().getFoodLevel() > eatingInitialFoodLevel;
         if (finished || eatingTicks > 20 * 10) { // guard: 10s max
+            client.options.useKey.setPressed(false);
             eating = false;
             eatingStarted = false;
             eatingUsing = false;
@@ -232,6 +275,30 @@ public final class LiveControlClient implements ClientModInitializer {
             }
         }
         return -1;
+    }
+
+    private static int findInventorySlotWithFood(ClientPlayerEntity player) {
+        for (int slot = 9; slot < player.getInventory().size(); slot++) {
+            ItemStack stack = player.getInventory().getStack(slot);
+            if (!stack.isEmpty() && isFoodItem(stack.getItem())) {
+                return slot;
+            }
+        }
+        return -1;
+    }
+
+    private static int moveFoodToHotbar(MinecraftClient client, ClientPlayerEntity player) {
+        int inventorySlot = findInventorySlotWithFood(player);
+        if (inventorySlot < 0 || client.interactionManager == null) {
+            return -1;
+        }
+
+        int hotbarSlot = firstEmptyHotbarSlot(player);
+        if (hotbarSlot < 0) {
+            hotbarSlot = player.getInventory().selectedSlot;
+        }
+        client.interactionManager.clickSlot(player.currentScreenHandler.syncId, inventorySlotToScreenSlot(inventorySlot), hotbarSlot, SlotActionType.SWAP, player);
+        return hotbarSlot;
     }
 
     private static boolean isFoodItem(Item item) {
@@ -340,6 +407,12 @@ public final class LiveControlClient implements ClientModInitializer {
             return;
         }
 
+        if (command == LiveControlCommands.SLEEP && !isNightTime(client)) {
+            client.player.sendMessage(Text.literal("LiveControl ignored Sleep because it is not nighttime."), true);
+            cancelQueuedLiveChatCommands();
+            return;
+        }
+
         if (!isCommandAvailableInCurrentDimension(command, client.player)) {
             client.player.sendMessage(Text.literal("LiveControl ignored " + command.displayName() + " in this dimension."), true);
             cancelQueuedLiveChatCommands();
@@ -367,10 +440,13 @@ public final class LiveControlClient implements ClientModInitializer {
         breakHoldTicks = 0;
         breakTargetPos = null;
         breakTargetFacing = null;
+        client.options.useKey.setPressed(false);
         eating = false;
         eatingStarted = false;
         eatingTargetSlot = -1;
         eatingTicks = 0;
+        pendingSleepBedPos = null;
+        sleepPathStarted = false;
 
         lastLiveChatCommandTime = now;
         executeLiveChatCommand(client, command, true);
@@ -413,6 +489,11 @@ public final class LiveControlClient implements ClientModInitializer {
                     client.player.sendMessage(Text.literal("LiveControl closed the current screen."), true);
                 }
             }
+            return;
+        }
+
+        if (command == LiveControlCommands.SLEEP) {
+            startSleepAutomation(client);
             return;
         }
 
@@ -463,6 +544,75 @@ public final class LiveControlClient implements ClientModInitializer {
                         return Command.SINGLE_SUCCESS;
                     }));
 
+            dispatcher.register(ClientCommandManager.literal("safezone")
+                    .executes(context -> {
+                        ClientPlayerEntity player = context.getSource().getPlayer();
+                        if (player == null) {
+                            return Command.SINGLE_SUCCESS;
+                        }
+
+                        LiveControlConfig currentConfig = config();
+                        String id = UUID.randomUUID().toString();
+                        String name = "SafeZone " + (currentConfig.safeZones.size() + 1);
+                        Vec3d pos = player.getPos();
+                        currentConfig.safeZones.add(new LiveControlConfig.SafeZone(
+                                id,
+                                name,
+                                worldId(player),
+                                pos.x,
+                                pos.y,
+                                pos.z
+                        ));
+                        saveConfig(currentConfig);
+                        context.getSource().sendFeedback(Text.literal("LiveControl saved " + name + " within 20 blocks."));
+                        return Command.SINGLE_SUCCESS;
+                    })
+                    .then(ClientCommandManager.literal("delete")
+                            .executes(context -> {
+                                ClientPlayerEntity player = context.getSource().getPlayer();
+                                if (player == null) {
+                                    return Command.SINGLE_SUCCESS;
+                                }
+
+                                LiveControlConfig currentConfig = config();
+                                LiveControlConfig.SafeZone nearest = nearestSafeZone(player, Double.MAX_VALUE);
+                                if (nearest == null) {
+                                    context.getSource().sendFeedback(Text.literal("LiveControl has no safezones in this dimension."));
+                                    return Command.SINGLE_SUCCESS;
+                                }
+
+                                currentConfig.safeZones.remove(nearest);
+                                saveConfig(currentConfig);
+                                context.getSource().sendFeedback(Text.literal("LiveControl deleted " + safeZoneName(nearest) + "."));
+                                return Command.SINGLE_SUCCESS;
+                            }))
+                    .then(ClientCommandManager.literal("show")
+                            .executes(context -> {
+                                safeZonesVisible = true;
+                                context.getSource().sendFeedback(Text.literal("LiveControl safezone outlines shown."));
+                                return Command.SINGLE_SUCCESS;
+                            }))
+                    .then(ClientCommandManager.literal("hide")
+                            .executes(context -> {
+                                safeZonesVisible = false;
+                                context.getSource().sendFeedback(Text.literal("LiveControl safezone outlines hidden."));
+                                return Command.SINGLE_SUCCESS;
+                            })));
+
+            dispatcher.register(ClientCommandManager.literal("waypoint")
+                    .then(ClientCommandManager.literal("show")
+                            .executes(context -> {
+                                safeZonesVisible = true;
+                                context.getSource().sendFeedback(Text.literal("LiveControl waypoint outlines shown."));
+                                return Command.SINGLE_SUCCESS;
+                            }))
+                    .then(ClientCommandManager.literal("hide")
+                            .executes(context -> {
+                                safeZonesVisible = false;
+                                context.getSource().sendFeedback(Text.literal("LiveControl waypoint outlines hidden."));
+                                return Command.SINGLE_SUCCESS;
+                            })));
+
             dispatcher.register(ClientCommandManager.literal("back")
                     .executes(context -> {
                         goBack();
@@ -482,17 +632,22 @@ public final class LiveControlClient implements ClientModInitializer {
         cancelQueuedLiveChatCommands();
         rerunLastCommandAfterRespawn = false;
         pendingHomeAfterNetherPortal = false;
+        pendingSleepBedPos = null;
+        sleepPathStarted = false;
+        safeZoneEscapeMemoryTicks = 0;
         // stop any automated attack/mob state and pickaxe automation; clear movement keys so the player regains control
         MinecraftClient client = MinecraftClient.getInstance();
         if (client != null) {
             if (client.player != null) {
                 stopMovement(client, client.player);
             }
+            client.options.useKey.setPressed(false);
             if (client.currentScreen != null) {
                 client.setScreen(null);
             }
         }
         attackTarget = null;
+        attackBlockedTicks = 0;
         runningFromMobs = false;
         obstacleAvoidanceTicks = 0;
         corneredTicks = 0;
@@ -524,6 +679,7 @@ public final class LiveControlClient implements ClientModInitializer {
         if (player == null) {
             previousHurtTime = 0;
             attackTarget = null;
+            attackBlockedTicks = 0;
             runningFromMobs = false;
             obstacleAvoidanceTicks = 0;
             corneredTicks = 0;
@@ -534,9 +690,24 @@ public final class LiveControlClient implements ClientModInitializer {
         if (!chatCommandsEnabled) {
             previousHurtTime = player.hurtTime;
             attackTarget = null;
+            attackBlockedTicks = 0;
             runningFromMobs = false;
             obstacleAvoidanceTicks = 0;
             corneredTicks = 0;
+            return;
+        }
+
+        if (eating || player.getHungerManager().getFoodLevel() <= LOW_HUNGER_FOOD_LEVEL) {
+            previousHurtTime = player.hurtTime;
+            attackTarget = null;
+            attackBlockedTicks = 0;
+            runningFromMobs = false;
+            stopMovement(client, player);
+            return;
+        }
+
+        if (tickSafeZoneEscape(client, player)) {
+            previousHurtTime = player.hurtTime;
             return;
         }
 
@@ -598,9 +769,6 @@ public final class LiveControlClient implements ClientModInitializer {
     }
 
     private static boolean isCommandAvailableInCurrentDimension(LiveControlCommands command, ClientPlayerEntity player) {
-        if (command == LiveControlCommands.STONE && isInNether(player)) {
-            return false;
-        }
         if (command == LiveControlCommands.GOLD && !isInNether(player)) {
             return false;
         }
@@ -615,11 +783,258 @@ public final class LiveControlClient implements ClientModInitializer {
         if (command == LiveControlCommands.WOOD && isInNether(player)) {
             return new String[]{"#mine minecraft:crimson_stem"};
         }
+        if (command == LiveControlCommands.STONE && isInNether(player)) {
+            return new String[]{"#mine minecraft:netherrack"};
+        }
         return command.chatCommands();
     }
 
     private static boolean isInNether(ClientPlayerEntity player) {
         return player != null && player.getWorld().getRegistryKey() == World.NETHER;
+    }
+
+    private static boolean isNightTime(MinecraftClient client) {
+        if (client == null || client.world == null) {
+            return false;
+        }
+
+        long time = client.world.getTimeOfDay() % 24000L;
+        return time >= 12542L && time <= 23458L;
+    }
+
+    private static void startSleepAutomation(MinecraftClient client) {
+        if (client.player == null || client.world == null || client.getNetworkHandler() == null) {
+            return;
+        }
+
+        if (!isNightTime(client)) {
+            client.player.sendMessage(Text.literal("LiveControl ignored Sleep because it is not nighttime."), true);
+            return;
+        }
+
+        BlockPos bedPos = nearestBed(client, client.player, SLEEP_BED_SEARCH_RADIUS);
+        if (bedPos == null) {
+            client.player.sendMessage(Text.literal("LiveControl could not find a nearby bed."), true);
+            return;
+        }
+
+        pendingSleepBedPos = bedPos.toImmutable();
+        sleepPathStarted = false;
+        tickSleepAutomation(client);
+    }
+
+    private static void tickSleepAutomation(MinecraftClient client) {
+        if (pendingSleepBedPos == null) {
+            return;
+        }
+        if (client == null || client.player == null || client.world == null || client.interactionManager == null || client.getNetworkHandler() == null) {
+            pendingSleepBedPos = null;
+            sleepPathStarted = false;
+            return;
+        }
+        if (!chatCommandsEnabled || client.player.isSleeping()) {
+            pendingSleepBedPos = null;
+            sleepPathStarted = false;
+            return;
+        }
+        if (!isNightTime(client)) {
+            pendingSleepBedPos = null;
+            sleepPathStarted = false;
+            client.player.sendMessage(Text.literal("LiveControl stopped Sleep because it is no longer nighttime."), true);
+            return;
+        }
+        if (!(client.world.getBlockState(pendingSleepBedPos).getBlock() instanceof BedBlock)) {
+            pendingSleepBedPos = null;
+            sleepPathStarted = false;
+            client.player.sendMessage(Text.literal("LiveControl stopped Sleep because the bed is gone."), true);
+            return;
+        }
+
+        if (client.player.getPos().squaredDistanceTo(Vec3d.ofCenter(pendingSleepBedPos)) > SLEEP_BED_INTERACT_DISTANCE * SLEEP_BED_INTERACT_DISTANCE) {
+            if (!sleepPathStarted) {
+                sendMinecraftChatMessage(client, "#goto " + pendingSleepBedPos.getX() + " " + pendingSleepBedPos.getY() + " " + pendingSleepBedPos.getZ());
+                client.player.sendMessage(Text.literal("LiveControl going to nearest bed."), true);
+                sleepPathStarted = true;
+            }
+            return;
+        }
+
+        sendMinecraftChatMessage(client, "#stop");
+        stopMovement(client, client.player);
+        facePosition(client.player, Vec3d.ofCenter(pendingSleepBedPos));
+        BlockHitResult hit = new BlockHitResult(Vec3d.ofCenter(pendingSleepBedPos), Direction.UP, pendingSleepBedPos, false);
+        client.interactionManager.interactBlock(client.player, Hand.MAIN_HAND, hit);
+        client.player.swingHand(Hand.MAIN_HAND);
+        pendingSleepBedPos = null;
+        sleepPathStarted = false;
+    }
+
+    private static BlockPos nearestBed(MinecraftClient client, ClientPlayerEntity player, int radius) {
+        BlockPos playerPos = player.getBlockPos();
+        BlockPos nearest = null;
+        double nearestSquaredDistance = Double.MAX_VALUE;
+        for (BlockPos pos : BlockPos.iterate(playerPos.add(-radius, -16, -radius), playerPos.add(radius, 16, radius))) {
+            if (!(client.world.getBlockState(pos).getBlock() instanceof BedBlock)) {
+                continue;
+            }
+
+            double squaredDistance = playerPos.getSquaredDistance(pos);
+            if (squaredDistance < nearestSquaredDistance) {
+                nearest = pos.toImmutable();
+                nearestSquaredDistance = squaredDistance;
+            }
+        }
+        return nearest;
+    }
+
+    private static String worldId(ClientPlayerEntity player) {
+        return player.getWorld().getRegistryKey().getValue().toString();
+    }
+
+    private static String safeZoneName(LiveControlConfig.SafeZone safeZone) {
+        return safeZone.name == null || safeZone.name.isBlank() ? "safezone" : safeZone.name;
+    }
+
+    private static LiveControlConfig.SafeZone nearestSafeZone(ClientPlayerEntity player, double maxDistance) {
+        if (player == null || config().safeZones == null || config().safeZones.isEmpty()) {
+            return null;
+        }
+
+        String currentWorld = worldId(player);
+        double maxSquaredDistance = maxDistance * maxDistance;
+        LiveControlConfig.SafeZone nearest = null;
+        double nearestSquaredDistance = Double.MAX_VALUE;
+        Vec3d playerPos = player.getPos();
+        for (LiveControlConfig.SafeZone safeZone : config().safeZones) {
+            if (safeZone == null || !currentWorld.equals(safeZone.world)) {
+                continue;
+            }
+
+            double radius = safeZone.radius > 0.0D ? safeZone.radius : SAFE_ZONE_RADIUS;
+            double allowedSquaredDistance = maxDistance == Double.MAX_VALUE
+                    ? Double.MAX_VALUE
+                    : Math.min(maxSquaredDistance, radius * radius);
+            double squaredDistance = playerPos.squaredDistanceTo(safeZone.x, safeZone.y, safeZone.z);
+            if (squaredDistance <= allowedSquaredDistance && squaredDistance < nearestSquaredDistance) {
+                nearest = safeZone;
+                nearestSquaredDistance = squaredDistance;
+            }
+        }
+        return nearest;
+    }
+
+    private static List<LiveControlConfig.SafeZone> containingSafeZones(ClientPlayerEntity player) {
+        if (player == null || config().safeZones == null || config().safeZones.isEmpty()) {
+            return List.of();
+        }
+
+        String currentWorld = worldId(player);
+        Vec3d playerPos = player.getPos();
+        return config().safeZones.stream()
+                .filter(safeZone -> safeZone != null && currentWorld.equals(safeZone.world))
+                .filter(safeZone -> {
+                    double radius = safeZone.radius > 0.0D ? safeZone.radius : SAFE_ZONE_RADIUS;
+                    return playerPos.squaredDistanceTo(safeZone.x, safeZone.y, safeZone.z) <= radius * radius;
+                })
+                .toList();
+    }
+
+    private static List<LiveControlConfig.SafeZone> nearbySafeZones(ClientPlayerEntity player, double extraDistance) {
+        if (player == null || config().safeZones == null || config().safeZones.isEmpty()) {
+            return List.of();
+        }
+
+        String currentWorld = worldId(player);
+        Vec3d playerPos = player.getPos();
+        return config().safeZones.stream()
+                .filter(safeZone -> safeZone != null && currentWorld.equals(safeZone.world))
+                .filter(safeZone -> {
+                    double radius = safeZone.radius > 0.0D ? safeZone.radius : SAFE_ZONE_RADIUS;
+                    double triggerDistance = radius + extraDistance;
+                    return playerPos.squaredDistanceTo(safeZone.x, safeZone.y, safeZone.z) <= triggerDistance * triggerDistance;
+                })
+                .toList();
+    }
+
+    private static Vec3d safeZoneClusterCenter(List<LiveControlConfig.SafeZone> safeZones) {
+        if (safeZones.isEmpty()) {
+            return Vec3d.ZERO;
+        }
+
+        double x = 0.0D;
+        double y = 0.0D;
+        double z = 0.0D;
+        for (LiveControlConfig.SafeZone safeZone : safeZones) {
+            x += safeZone.x;
+            y += safeZone.y;
+            z += safeZone.z;
+        }
+        double count = safeZones.size();
+        return new Vec3d(x / count, y / count, z / count);
+    }
+
+    private static boolean tickSafeZoneEscape(MinecraftClient client, ClientPlayerEntity player) {
+        if (safeZoneStopCooldownTicks > 0) {
+            safeZoneStopCooldownTicks--;
+        }
+
+        List<LiveControlConfig.SafeZone> activeSafeZones = containingSafeZones(player);
+        if (!activeSafeZones.isEmpty()) {
+            safeZoneEscapeMemoryTicks = SAFE_ZONE_ESCAPE_MEMORY_TICKS;
+        } else if (safeZoneEscapeMemoryTicks > 0) {
+            safeZoneEscapeMemoryTicks--;
+        }
+
+        List<LiveControlConfig.SafeZone> threatSafeZones = nearbySafeZones(player, SAFE_ZONE_CLEAR_MARGIN + SAFE_ZONE_ESCAPE_LOOKAHEAD_BLOCKS);
+        if (activeSafeZones.isEmpty() && (safeZoneEscapeMemoryTicks <= 0 || threatSafeZones.isEmpty())) {
+            return false;
+        }
+
+        cancelQueuedLiveChatCommands();
+        attackTarget = null;
+        attackBlockedTicks = 0;
+        runningFromMobs = false;
+        if (safeZoneStopCooldownTicks <= 0) {
+            sendMinecraftChatMessage(client, "#stop");
+            List<LiveControlConfig.SafeZone> messageSafeZones = activeSafeZones.isEmpty() ? threatSafeZones : activeSafeZones;
+            String zoneText = messageSafeZones.size() == 1
+                    ? safeZoneName(messageSafeZones.get(0))
+                    : messageSafeZones.size() + " nearby safezones";
+            player.sendMessage(Text.literal("LiveControl avoiding " + zoneText + "."), true);
+            safeZoneStopCooldownTicks = SAFE_ZONE_STOP_COOLDOWN_TICKS;
+        }
+        runAwayFromSafeZones(client, player, threatSafeZones.isEmpty() ? activeSafeZones : threatSafeZones);
+        return true;
+    }
+
+    private static void tickAfkHungerSafety(MinecraftClient client) {
+        if (!chatCommandsEnabled || eating || client == null || client.player == null || client.getNetworkHandler() == null) {
+            return;
+        }
+
+        if (client.player.getHungerManager().getFoodLevel() > LOW_HUNGER_FOOD_LEVEL) {
+            return;
+        }
+
+        int slot = findHotbarItemSlotWithFood(client.player);
+        if (slot < 0) {
+            slot = moveFoodToHotbar(client, client.player);
+        }
+        if (slot < 0) {
+            client.player.sendMessage(Text.literal("LiveControl low hunger, but no food was found."), true);
+            return;
+        }
+
+        cancelQueuedLiveChatCommands();
+        sendMinecraftChatMessage(client, "#stop");
+        stopMovement(client, client.player);
+        eating = true;
+        eatingStarted = false;
+        eatingUsing = false;
+        eatingTargetSlot = -1;
+        eatingTicks = 0;
+        eatingInitialFoodLevel = client.player.getHungerManager().getFoodLevel();
+        client.player.sendMessage(Text.literal("LiveControl paused to eat."), true);
     }
 
     private static void tickCameraFollowMovement(MinecraftClient client) {
@@ -690,6 +1105,7 @@ public final class LiveControlClient implements ClientModInitializer {
                 rerunLastCommandIfAllowed(client);
             }
             attackTarget = null;
+            attackBlockedTicks = 0;
             stopMovement(client, player);
             return false;
         }
@@ -697,9 +1113,25 @@ public final class LiveControlClient implements ClientModInitializer {
         double squaredDistance = player.squaredDistanceTo(attackTarget);
         if (squaredDistance > ATTACK_CANCEL_DISTANCE * ATTACK_CANCEL_DISTANCE) {
             attackTarget = null;
+            attackBlockedTicks = 0;
             stopMovement(client, player);
             return false;
         }
+
+        boolean hasLineOfSight = hasClearLineOfSight(player, attackTarget);
+        if (!hasLineOfSight) {
+            attackBlockedTicks++;
+            stopMovement(client, player);
+            faceEntity(player, attackTarget);
+            if (attackBlockedTicks >= ATTACK_BLOCKED_CANCEL_TICKS) {
+                attackTarget = null;
+                attackBlockedTicks = 0;
+                rerunLastCommandIfAllowed(client);
+                return false;
+            }
+            return true;
+        }
+        attackBlockedTicks = 0;
 
         equipBestDamageTool(player);
         faceEntity(player, attackTarget);
@@ -730,6 +1162,23 @@ public final class LiveControlClient implements ClientModInitializer {
                 && target.getWorld() == player.getWorld();
     }
 
+    private static boolean hasClearLineOfSight(ClientPlayerEntity player, Entity target) {
+        if (player == null || target == null || player.getWorld() == null) {
+            return false;
+        }
+
+        Vec3d start = player.getEyePos();
+        Vec3d end = target.getPos().add(0.0D, target.getHeight() * 0.6D, 0.0D);
+        HitResult hit = player.getWorld().raycast(new RaycastContext(
+                start,
+                end,
+                RaycastContext.ShapeType.COLLIDER,
+                RaycastContext.FluidHandling.NONE,
+                player
+        ));
+        return hit.getType() == HitResult.Type.MISS || hit.getPos().squaredDistanceTo(end) < 1.0D;
+    }
+
     private static void tickMobEscape(MinecraftClient client, ClientPlayerEntity player) {
         HostileEntity nearestMob = nearestHostileMob(player, runningFromMobs ? MOB_RUN_STOP_DISTANCE : MOB_RUN_START_DISTANCE);
         if (nearestMob == null) {
@@ -755,7 +1204,10 @@ public final class LiveControlClient implements ClientModInitializer {
         List<HostileEntity> mobs = player.getWorld().getEntitiesByClass(
                 HostileEntity.class,
                 player.getBoundingBox().expand(distance),
-                mob -> mob.isAlive() && !mob.isRemoved() && player.squaredDistanceTo(mob) <= squaredDistance
+                mob -> mob.isAlive()
+                        && !mob.isRemoved()
+                        && player.squaredDistanceTo(mob) <= squaredDistance
+                        && hasClearLineOfSight(player, mob)
         );
         return mobs.stream()
                 .min(Comparator.comparingDouble(player::squaredDistanceTo))
@@ -763,7 +1215,113 @@ public final class LiveControlClient implements ClientModInitializer {
     }
 
     private static void runAwayFrom(MinecraftClient client, ClientPlayerEntity player, Entity threat) {
-        Vec3d away = player.getPos().subtract(threat.getPos());
+        runAwayFromPosition(client, player, threat.getPos());
+    }
+
+    private static void runAwayFromSafeZones(MinecraftClient client, ClientPlayerEntity player, List<LiveControlConfig.SafeZone> safeZones) {
+        Vec3d away = player.getPos().subtract(safeZoneClusterCenter(safeZones));
+        if (away.horizontalLengthSquared() < 1.0E-6D) {
+            away = player.getRotationVector();
+        }
+
+        Vec3d escape = safestEscapeVector(client, player, away, safeZones);
+        setYawFromVector(player, escape);
+        moveForward(client, player, true);
+        client.options.sneakKey.setPressed(escapeDescentDrop(client, player, escape) > 0);
+        Vec3d forward = Vec3d.fromPolar(0.0F, player.getYaw()).normalize().multiply(canSprintSafely(player) ? 0.14D : 0.09D);
+        Vec3d velocity = player.getVelocity();
+        player.setVelocity(forward.x, velocity.y, forward.z);
+    }
+
+    private static Vec3d safestEscapeVector(MinecraftClient client, ClientPlayerEntity player, Vec3d preferred, List<LiveControlConfig.SafeZone> safeZones) {
+        double[] angles = new double[]{0.0D, -20.0D, 20.0D, -45.0D, 45.0D, -70.0D, 70.0D, -110.0D, 110.0D, 160.0D, -160.0D};
+        Vec3d best = preferred;
+        int bestScore = Integer.MIN_VALUE;
+        for (double angle : angles) {
+            Vec3d candidate = rotateHorizontal(preferred, angle);
+            int score = scoreEscapeVector(client, player, candidate, safeZones);
+            if (score > bestScore) {
+                best = candidate;
+                bestScore = score;
+            }
+        }
+        return best;
+    }
+
+    private static int scoreEscapeVector(MinecraftClient client, ClientPlayerEntity player, Vec3d vector, List<LiveControlConfig.SafeZone> safeZones) {
+        if (client.world == null || vector.horizontalLengthSquared() < 1.0E-6D) {
+            return Integer.MIN_VALUE;
+        }
+
+        Vec3d direction = new Vec3d(vector.x, 0.0D, vector.z).normalize();
+        int score = 0;
+        for (int step = 1; step <= SAFE_ZONE_ESCAPE_LOOKAHEAD_BLOCKS; step++) {
+            Vec3d probePos = player.getPos().add(direction.multiply(step));
+            BlockPos probe = BlockPos.ofFloored(probePos);
+            int drop = safeDropDistance(client, probe);
+            if (drop < 0) {
+                return Integer.MIN_VALUE + step;
+            }
+
+            int zonesStillInside = 0;
+            double nearestEdgeDistance = Double.MAX_VALUE;
+            for (LiveControlConfig.SafeZone safeZone : safeZones) {
+                double radius = safeZone.radius > 0.0D ? safeZone.radius : SAFE_ZONE_RADIUS;
+                double distance = Math.sqrt(probePos.squaredDistanceTo(safeZone.x, safeZone.y, safeZone.z));
+                double edgeDistance = distance - radius;
+                nearestEdgeDistance = Math.min(nearestEdgeDistance, edgeDistance);
+                if (edgeDistance < 0.0D) {
+                    zonesStillInside++;
+                }
+            }
+
+            score += 20 - drop * 6 - zonesStillInside * 45;
+            score += (int) Math.max(-40.0D, Math.min(40.0D, nearestEdgeDistance * 3.0D));
+            if (drop == 0) {
+                score += 4;
+            }
+        }
+        return score;
+    }
+
+    private static int escapeDescentDrop(MinecraftClient client, ClientPlayerEntity player, Vec3d vector) {
+        if (client.world == null || vector.horizontalLengthSquared() < 1.0E-6D) {
+            return 0;
+        }
+        Vec3d direction = new Vec3d(vector.x, 0.0D, vector.z).normalize();
+        return Math.max(0, safeDropDistance(client, BlockPos.ofFloored(player.getPos().add(direction))));
+    }
+
+    private static int safeDropDistance(MinecraftClient client, BlockPos pos) {
+        for (int drop = 0; drop <= SAFE_ZONE_MAX_DESCENT_DROP; drop++) {
+            BlockPos feet = pos.down(drop);
+            BlockPos head = feet.up();
+            BlockPos ground = feet.down();
+            BlockState feetState = client.world.getBlockState(feet);
+            BlockState headState = client.world.getBlockState(head);
+            BlockState groundState = client.world.getBlockState(ground);
+            if (!feetState.getCollisionShape(client.world, feet).isEmpty() || !headState.getCollisionShape(client.world, head).isEmpty()) {
+                continue;
+            }
+            if (!groundState.getCollisionShape(client.world, ground).isEmpty() && isSafeBlockToStandOn(groundState)) {
+                return drop;
+            }
+        }
+        return -1;
+    }
+
+    private static boolean isSafeBlockToStandOn(BlockState state) {
+        return !state.isOf(Blocks.LAVA)
+                && !state.isOf(Blocks.FIRE)
+                && !state.isOf(Blocks.SOUL_FIRE)
+                && !state.isOf(Blocks.CACTUS)
+                && !state.isOf(Blocks.MAGMA_BLOCK)
+                && !state.isOf(Blocks.CAMPFIRE)
+                && !state.isOf(Blocks.SOUL_CAMPFIRE);
+    }
+
+    private static void runAwayFromPosition(MinecraftClient client, ClientPlayerEntity player, Vec3d threatPos) {
+        Vec3d away = player.getPos().subtract(threatPos);
         if (away.horizontalLengthSquared() < 1.0E-6D) {
             away = player.getRotationVector();
         }
@@ -781,7 +1339,7 @@ public final class LiveControlClient implements ClientModInitializer {
 
         setYawFromVector(player, escape);
         moveForward(client, player, true);
-        Vec3d forward = Vec3d.fromPolar(0.0F, player.getYaw()).normalize().multiply(0.18D);
+        Vec3d forward = Vec3d.fromPolar(0.0F, player.getYaw()).normalize().multiply(canSprintSafely(player) ? 0.18D : 0.10D);
         Vec3d velocity = player.getVelocity();
         player.setVelocity(forward.x, velocity.y, forward.z);
     }
@@ -812,14 +1370,23 @@ public final class LiveControlClient implements ClientModInitializer {
         setYawFromVector(player, toward);
     }
 
+    private static void facePosition(ClientPlayerEntity player, Vec3d position) {
+        Vec3d toward = position.subtract(player.getEyePos());
+        setYawFromVector(player, toward);
+        double horizontalDistance = Math.sqrt(toward.x * toward.x + toward.z * toward.z);
+        player.setPitch((float) (-Math.toDegrees(Math.atan2(toward.y, horizontalDistance))));
+    }
+
     private static void setYawFromVector(ClientPlayerEntity player, Vec3d vector) {
         player.setYaw((float) (Math.toDegrees(Math.atan2(vector.z, vector.x)) - 90.0D));
     }
 
     private static void moveForward(MinecraftClient client, ClientPlayerEntity player, boolean sprinting) {
+        sprinting = sprinting && canSprintSafely(player);
         player.setSprinting(sprinting);
         client.options.forwardKey.setPressed(true);
         client.options.sprintKey.setPressed(sprinting);
+        client.options.sneakKey.setPressed(false);
         client.options.backKey.setPressed(false);
         client.options.leftKey.setPressed(false);
         client.options.rightKey.setPressed(false);
@@ -831,9 +1398,14 @@ public final class LiveControlClient implements ClientModInitializer {
         player.input.movementSideways = 0.0F;
     }
 
+    private static boolean canSprintSafely(ClientPlayerEntity player) {
+        return player != null && player.getHungerManager().getFoodLevel() > LOW_HUNGER_FOOD_LEVEL;
+    }
+
     private static void stopMovement(MinecraftClient client, ClientPlayerEntity player) {
         client.options.forwardKey.setPressed(false);
         client.options.sprintKey.setPressed(false);
+        client.options.sneakKey.setPressed(false);
         client.options.backKey.setPressed(false);
         client.options.leftKey.setPressed(false);
         client.options.rightKey.setPressed(false);
@@ -891,6 +1463,7 @@ public final class LiveControlClient implements ClientModInitializer {
         cancelQueuedLiveChatCommands();
         sendMinecraftChatMessage("#stop");
         attackTarget = target;
+        attackBlockedTicks = 0;
         runningFromMobs = false;
         obstacleAvoidanceTicks = 0;
         corneredTicks = 0;
@@ -899,6 +1472,50 @@ public final class LiveControlClient implements ClientModInitializer {
     private static void setAutoJumpEnabled(boolean enabled) {
         pendingAutoJumpEnabled = enabled;
         applyPendingAutoJumpSetting(MinecraftClient.getInstance());
+    }
+
+    private static void renderSafeZones(net.fabricmc.fabric.api.client.rendering.v1.WorldRenderContext context) {
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (!safeZonesVisible || client == null || client.player == null || context.world() == null || context.consumers() == null) {
+            return;
+        }
+        if (config().safeZones == null || config().safeZones.isEmpty()) {
+            return;
+        }
+
+        String currentWorld = worldId(client.player);
+        Vec3d cameraPos = context.camera().getPos();
+        MatrixStack matrices = context.matrixStack();
+        VertexConsumer lines = context.consumers().getBuffer(RenderLayer.getLines());
+
+        matrices.push();
+        matrices.translate(-cameraPos.x, -cameraPos.y, -cameraPos.z);
+        for (LiveControlConfig.SafeZone safeZone : config().safeZones) {
+            if (safeZone == null || !currentWorld.equals(safeZone.world)) {
+                continue;
+            }
+            Vec3d zoneCenter = new Vec3d(safeZone.x, safeZone.y, safeZone.z);
+            if (client.player.getPos().squaredDistanceTo(zoneCenter) > SAFE_ZONE_RENDER_DISTANCE * SAFE_ZONE_RENDER_DISTANCE) {
+                continue;
+            }
+
+            double radius = safeZone.radius > 0.0D ? safeZone.radius : SAFE_ZONE_RADIUS;
+            WorldRenderer.drawBox(
+                    matrices,
+                    lines,
+                    safeZone.x - radius, safeZone.y - radius, safeZone.z - radius,
+                    safeZone.x + radius, safeZone.y + radius, safeZone.z + radius,
+                    1.0F, 1.0F, 1.0F, 0.9F
+            );
+            WorldRenderer.drawBox(
+                    matrices,
+                    lines,
+                    safeZone.x - 0.5D, safeZone.y - 0.5D, safeZone.z - 0.5D,
+                    safeZone.x + 0.5D, safeZone.y + 0.5D, safeZone.z + 0.5D,
+                    1.0F, 1.0F, 1.0F, 1.0F
+            );
+        }
+        matrices.pop();
     }
 
     private static void applyPendingAutoJumpSetting(MinecraftClient client) {

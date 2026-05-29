@@ -7,7 +7,7 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 public enum LiveControlCommands {
-    STONE("Stone", "#mine stone", "stone", "#stone", "#mine stone"),
+    STONE("Mine", "#mine stone", "mine", "#mine", "stone", "#stone", "#mine stone"),
     WOOD("Wood", "#mine oak_log", "wood", "#wood", "#mine wood", "#mine oak_log"),
     FARM("Farm", "#farm", "farm", "#farm"),
     NETHER("Nether", "#goto minecraft:nether_portal", "nether", "#nether", "go nether", "goto nether"),
@@ -19,6 +19,7 @@ public enum LiveControlCommands {
     LOOT("Loot", "#pickup", "loot", "#loot", "pickup", "#pickup"),
     EXPLORE("Explore", "#explore", "explore", "#explore"),
     CLOSE("Close", "#close", "close", "#close"),
+    SLEEP("Sleep", new String[0], "sleep", "#sleep"),
     STOP("Stop", "#stop", "stop", "#stop");
 
     private static final String BOSS_BAR_PREFIX = "";

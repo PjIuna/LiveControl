@@ -1,0 +1,1779 @@
+﻿package com.livecontrol.client;
+
+import com.mojang.brigadier.Command;
+import net.fabricmc.api.ClientModInitializer;
+import net.fabricmc.fabric.api.client.rendering.v1.HudRenderCallback;
+import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderEvents;
+import net.minecraft.client.gui.DrawContext;
+import net.minecraft.client.render.RenderLayer;
+import net.minecraft.client.render.VertexConsumer;
+import net.minecraft.client.render.WorldRenderer;
+import net.minecraft.client.util.math.MatrixStack;
+import net.fabricmc.fabric.api.client.command.v2.ClientCommandManager;
+import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
+import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.gui.screen.DeathScreen;
+import net.minecraft.client.network.ClientPlayerEntity;
+import net.minecraft.entity.Entity;
+import net.minecraft.entity.LivingEntity;
+import net.minecraft.entity.attribute.EntityAttributeModifier;
+import net.minecraft.entity.attribute.EntityAttributes;
+import net.minecraft.entity.damage.DamageSource;
+import net.minecraft.entity.mob.HostileEntity;
+import net.minecraft.item.Item;
+import net.minecraft.item.ItemStack;
+import net.minecraft.item.Items;
+import net.minecraft.item.PickaxeItem;
+import net.minecraft.recipe.Recipe;
+import net.minecraft.network.packet.c2s.play.UpdateSelectedSlotC2SPacket;
+import net.minecraft.recipe.RecipeType;
+import net.minecraft.registry.tag.ItemTags;
+import net.minecraft.screen.CraftingScreenHandler;
+import net.minecraft.screen.PlayerScreenHandler;
+import net.minecraft.screen.ScreenHandler;
+import net.minecraft.screen.slot.SlotActionType;
+import net.minecraft.text.Text;
+import net.minecraft.util.Hand;
+import net.minecraft.util.hit.HitResult;
+import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.hit.BlockHitResult;
+import net.minecraft.util.math.Direction;
+import net.minecraft.util.math.Vec3d;
+import net.minecraft.world.World;
+import net.minecraft.world.RaycastContext;
+import net.minecraft.block.Blocks;
+import net.minecraft.block.BedBlock;
+import net.minecraft.block.BlockState;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Locale;
+import java.util.Comparator;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Queue;
+import java.util.Set;
+import java.util.UUID;
+
+public final class LiveControlClient implements ClientModInitializer {
+    public static final String MOD_ID = "livecontrol";
+    public static final Logger LOGGER = LoggerFactory.getLogger(MOD_ID);
+
+    private static final YoutubeChatBridge YOUTUBE_CHAT_BRIDGE = new YoutubeChatBridge();
+    private static final TwitchChatBridge TWITCH_CHAT_BRIDGE = new TwitchChatBridge();
+    private static final KickChatBridge KICK_CHAT_BRIDGE = new KickChatBridge();
+    private static final int CHAT_BRIDGE_WATCHDOG_INTERVAL_TICKS = 20 * 20;
+    private static final long LIVE_CHAT_COMMAND_COOLDOWN_MILLIS = 30_000L;
+    private static final double ATTACK_CANCEL_DISTANCE = 24.0D;
+    private static final double ATTACK_REACH_DISTANCE = 3.0D;
+    private static final double MOB_RUN_START_DISTANCE = 8.0D;
+    private static final double MOB_RUN_STOP_DISTANCE = 12.0D;
+    private static final double MOB_CORNERED_ATTACK_DISTANCE = 4.5D;
+    private static final int ATTACK_BLOCKED_CANCEL_TICKS = 20 * 2;
+    private static final int COMMAND_SEQUENCE_DELAY_TICKS = 25;
+    private static final int OBSTACLE_AVOIDANCE_TICKS = 12;
+    private static final int CORNERED_ATTACK_TICKS = 10;
+    private static final double CAMERA_FOLLOW_MOVEMENT_THRESHOLD = 1.0E-4D;
+    private static final int BREAK_HOLD_TICKS_REQUIRED = 20 * 4; // 4 seconds
+    private static final float PITCH_TILT_THRESHOLD_DEGREES = 10.0F;
+    private static final int PITCH_TILT_TICKS_THRESHOLD = 20 * 10; // 10 seconds
+    private static final double SAFE_ZONE_RADIUS = 20.0D;
+    private static final int SAFE_ZONE_STOP_COOLDOWN_TICKS = 20 * 3;
+    private static final int SAFE_ZONE_ESCAPE_MEMORY_TICKS = 20 * 8;
+    private static final double SAFE_ZONE_CLEAR_MARGIN = 8.0D;
+    private static final int LOW_HUNGER_FOOD_LEVEL = 6;
+    private static final int SLEEP_BED_SEARCH_RADIUS = 200;
+    private static final double SLEEP_BED_INTERACT_DISTANCE = 3.5D;
+    private static final int SAFE_ZONE_MAX_DESCENT_DROP = 3;
+    private static final int SAFE_ZONE_ESCAPE_LOOKAHEAD_BLOCKS = 16;
+    private static final int SAFE_ZONE_RENDER_DISTANCE = 50;
+
+    private static LiveControlConfig config;
+    private static boolean chatCommandsEnabled = false;
+    private static boolean cameraFollowsPlayerMovement = false;
+    private static int previousHurtTime = 0;
+    private static int chatBridgeWatchdogTicks = 0;
+    private static long lastLiveChatCommandTime = 0L;
+    private static Entity attackTarget;
+    private static int attackBlockedTicks = 0;
+    private static boolean runningFromMobs = false;
+    private static final Queue<String> queuedLiveChatCommands = new ArrayDeque<>();
+    private static int queuedLiveChatCommandTicks = 0;
+    private static int obstacleAvoidanceTicks = 0;
+    private static int obstacleAvoidanceDirection = 1;
+    private static int corneredTicks = 0;
+    private static Vec3d previousCameraFollowPosition;
+    private static Float previousPitch = null;
+    private static Boolean pendingAutoJumpEnabled;
+    private static LiveControlCommands lastExecutedLiveChatCommand;
+    private static String[] lastExecutedLiveChatCommandMessages = new String[0];
+    private static boolean rerunLastCommandAfterRespawn;
+    private static boolean wasDead;
+    private static boolean wasInWorld;
+    private static boolean pendingHomeAfterNetherPortal;
+    // breaking state when holding the break action for several ticks
+    private static boolean breakHolding = false;
+    private static int breakHoldTicks = 0;
+    private static BlockPos breakTargetPos = null;
+    private static Direction breakTargetFacing = null;
+    // eating state when consuming food
+    private static boolean eating = false;
+    private static int eatingTargetSlot = -1;
+    private static int eatingInitialCount = 0;
+    private static int eatingInitialFoodLevel = 0;
+    private static int eatingTicks = 0;
+    private static int previousSelectedSlotBeforeEating = -1;
+    private static boolean eatingStarted = false;
+    private static boolean eatingUsing = false;
+    private static int pitchTiltTicks = 0;
+    private static int safeZoneStopCooldownTicks = 0;
+    private static int safeZoneEscapeMemoryTicks = 0;
+    private static final Set<String> safeZoneEscapeClusterIds = new HashSet<>();
+    private static BlockPos pendingSleepBedPos = null;
+    private static boolean sleepPathStarted = false;
+    private static boolean safeZonesVisible = false;
+
+
+    @Override
+    public void onInitializeClient() {
+        config = LiveControlConfig.load();
+        registerCommands();
+        setAutoJumpEnabled(chatCommandsEnabled);
+        ClientTickEvents.START_CLIENT_TICK.register(LiveControlClient::tickCombatAutomation);
+        ClientTickEvents.END_CLIENT_TICK.register(client -> {
+            applyPendingAutoJumpSetting(client);
+            tickBackOnJoin(client);
+            tickPendingHomeAfterNetherPortal(client);
+            tickAutoRespawn(client);
+            tickCameraFollowMovement(client);
+            tickPitchRecentering(client);
+            tickAfkHungerSafety(client);
+            tickSleepAutomation(client);
+            tickQueuedLiveChatCommands(client);
+            tickBreakHolding(client);
+            tickEating(client);
+            // pickaxe automation removed
+            LiveControlBossBar.tick();
+            tickChatBridgeWatchdog();
+        });
+        // HUD overlay: small status under the bossbar.
+        HudRenderCallback.EVENT.register((DrawContext drawContext, float tickDelta) -> {
+            MinecraftClient client = MinecraftClient.getInstance();
+            if (client == null || client.inGameHud == null) return;
+            if (!LiveControlBossBar.isVisible()) return;
+
+            String text = "Chat control active";
+            int textWidth = client.textRenderer.getWidth(Text.literal(text));
+            int padding = 6;
+            int boxWidth = textWidth + padding * 2;
+            int boxHeight = client.textRenderer.fontHeight + padding;
+            int centerX = client.getWindow().getScaledWidth() / 2;
+            int left = centerX - boxWidth / 2;
+            int top = 28; // place underneath the boss bar (moved up a little)
+
+            // draw text with simple shadow using DrawContext
+            drawContext.drawText(client.textRenderer, Text.literal(text), left + padding + 1, top + (padding / 4) + 1, 0x000000, false);
+            drawContext.drawText(client.textRenderer, Text.literal(text), left + padding, top + (padding / 4), 0xFFFF00, true);
+        });
+        WorldRenderEvents.LAST.register(LiveControlClient::renderSafeZones);
+        stopChatBridges();
+    }
+
+    // handle eating behavior each tick
+    private static void tickEating(MinecraftClient client) {
+        if (!eating) return;
+        if (client.player == null || client.interactionManager == null) {
+            eating = false;
+            eatingUsing = false;
+            eatingTargetSlot = -1;
+            eatingTicks = 0;
+            return;
+        }
+
+        // tickEating only handles progression of an already-started eating action
+
+        // if we haven't started using the item, select the slot and start using
+        if (!eatingStarted) {
+            int slot = findHotbarItemSlotWithFood(client.player);
+            if (slot < 0) {
+                slot = moveFoodToHotbar(client, client.player);
+            }
+            if (slot < 0) {
+                // no food found: cancel eating and allow previous action to continue
+                eating = false;
+                eatingStarted = false;
+                eatingUsing = false;
+                eatingTargetSlot = -1;
+                eatingTicks = 0;
+                // re-run last executed command if present
+                rerunLastCommandIfAllowed(client);
+                return;
+            }
+            previousSelectedSlotBeforeEating = client.player.getInventory().selectedSlot;
+            client.player.getInventory().selectedSlot = slot;
+            if (client.player.networkHandler != null) {
+                client.player.networkHandler.sendPacket(new UpdateSelectedSlotC2SPacket(slot));
+            }
+            eatingTargetSlot = slot;
+            eatingInitialCount = client.player.getInventory().getStack(slot).getCount();
+            eatingInitialFoodLevel = client.player.getHungerManager().getFoodLevel();
+            eatingStarted = true;
+            eatingTicks = 0;
+        }
+
+        // simulate holding use item by using interactItem
+        try {
+            client.options.useKey.setPressed(true);
+            client.interactionManager.interactItem(client.player, Hand.MAIN_HAND);
+        } catch (NoSuchMethodError | AbstractMethodError ignored) {
+            // fallback: just stop eating
+            client.options.useKey.setPressed(false);
+            eating = false;
+            eatingStarted = false;
+            eatingUsing = false;
+            eatingTargetSlot = -1;
+            eatingTicks = 0;
+            rerunLastCommandIfAllowed(client);
+            return;
+        }
+
+        eatingTicks++;
+
+        // if the item count decreased or player is no longer eating, consider finished
+        ItemStack stack = client.player.getInventory().getStack(eatingTargetSlot);
+        boolean finished = stack.isEmpty()
+                || stack.getCount() < eatingInitialCount
+                || client.player.getHungerManager().getFoodLevel() > eatingInitialFoodLevel;
+        if (finished || eatingTicks > 20 * 10) { // guard: 10s max
+            client.options.useKey.setPressed(false);
+            eating = false;
+            eatingStarted = false;
+            eatingUsing = false;
+            eatingTargetSlot = -1;
+            eatingTicks = 0;
+            // restore previous slot
+            if (previousSelectedSlotBeforeEating >= 0 && client.player.getInventory().selectedSlot != previousSelectedSlotBeforeEating) {
+                client.player.getInventory().selectedSlot = previousSelectedSlotBeforeEating;
+                if (client.player.networkHandler != null) {
+                    client.player.networkHandler.sendPacket(new UpdateSelectedSlotC2SPacket(previousSelectedSlotBeforeEating));
+                }
+            }
+            // after eating, rerun the last non-#stop command if available
+            rerunLastCommandIfAllowed(client);
+        }
+    }
+
+    private static int findHotbarItemSlotWithFood(ClientPlayerEntity player) {
+        for (int slot = 0; slot < 9; slot++) {
+            ItemStack stack = player.getInventory().getStack(slot);
+            if (!stack.isEmpty() && isFoodItem(stack.getItem())) {
+                return slot;
+            }
+        }
+        return -1;
+    }
+
+    private static int findInventorySlotWithFood(ClientPlayerEntity player) {
+        for (int slot = 9; slot < player.getInventory().size(); slot++) {
+            ItemStack stack = player.getInventory().getStack(slot);
+            if (!stack.isEmpty() && isFoodItem(stack.getItem())) {
+                return slot;
+            }
+        }
+        return -1;
+    }
+
+    private static int moveFoodToHotbar(MinecraftClient client, ClientPlayerEntity player) {
+        int inventorySlot = findInventorySlotWithFood(player);
+        if (inventorySlot < 0 || client.interactionManager == null) {
+            return -1;
+        }
+
+        int hotbarSlot = firstEmptyHotbarSlot(player);
+        if (hotbarSlot < 0) {
+            hotbarSlot = player.getInventory().selectedSlot;
+        }
+        client.interactionManager.clickSlot(player.currentScreenHandler.syncId, inventorySlotToScreenSlot(inventorySlot), hotbarSlot, SlotActionType.SWAP, player);
+        return hotbarSlot;
+    }
+
+    private static boolean isFoodItem(Item item) {
+        // use item tags or instance checks; simple check: edible items have food component
+        try {
+            return item.isFood();
+        } catch (NoSuchMethodError | AbstractMethodError ignored) {
+            return false;
+        }
+    }
+
+    public static void handleChatMessage(String message) {
+        String normalized = message == null ? "" : message.trim();
+        if (normalized.isBlank()) return;
+
+        String lower = normalized.toLowerCase(Locale.ROOT);
+        // open inventory
+        if (lower.equals("open inventory") || lower.equals("open") || lower.equals("inventory") || lower.equals("#openinv")) {
+            MinecraftClient client = MinecraftClient.getInstance();
+            client.execute(() -> {
+                if (client.player != null) {
+                    // open player's inventory screen directly
+                    client.setScreen(new net.minecraft.client.gui.screen.ingame.InventoryScreen(client.player));
+                }
+            });
+            return;
+        }
+
+        // delegate to enum-based matching for other simple commands
+        LiveControlCommands.fromChatMessage(message).ifPresent(command -> {
+            MinecraftClient client = MinecraftClient.getInstance();
+            client.execute(() -> runLiveChatCommand(command));
+        });
+    }
+
+    public static LiveControlConfig config() {
+        if (config == null) {
+            config = LiveControlConfig.load();
+        }
+        return config;
+    }
+
+    public static void saveConfig(LiveControlConfig updatedConfig) {
+        config = updatedConfig;
+        config.save();
+        if (chatCommandsEnabled) {
+            restartChatBridges();
+        } else {
+            stopChatBridges();
+        }
+    }
+
+    private static void restartChatBridges() {
+        if (!chatCommandsEnabled) {
+            stopChatBridges();
+            return;
+        }
+        chatBridgeWatchdogTicks = 0;
+        YOUTUBE_CHAT_BRIDGE.restart();
+        TWITCH_CHAT_BRIDGE.restart();
+        KICK_CHAT_BRIDGE.restart();
+    }
+
+    private static void stopChatBridges() {
+        chatBridgeWatchdogTicks = 0;
+        YOUTUBE_CHAT_BRIDGE.stop();
+        TWITCH_CHAT_BRIDGE.stop();
+        KICK_CHAT_BRIDGE.stop();
+    }
+
+    private static void tickChatBridgeWatchdog() {
+        if (!chatCommandsEnabled) {
+            stopChatBridges();
+            return;
+        }
+
+        chatBridgeWatchdogTicks++;
+        if (chatBridgeWatchdogTicks < CHAT_BRIDGE_WATCHDOG_INTERVAL_TICKS) {
+            return;
+        }
+
+        chatBridgeWatchdogTicks = 0;
+        YOUTUBE_CHAT_BRIDGE.ensureRunning();
+        TWITCH_CHAT_BRIDGE.ensureRunning();
+        KICK_CHAT_BRIDGE.ensureRunning();
+    }
+
+    public static boolean areChatCommandsEnabled() {
+        return chatCommandsEnabled;
+    }
+
+    public static boolean shouldKeepFullFps() {
+        return chatCommandsEnabled || LiveControlBossBar.isVisible();
+    }
+
+    public static void runLiveChatCommand(LiveControlCommands command) {
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (client == null) return;
+        // CLOSE should always execute immediately (no cooldown) and actually close the current screen
+        if (command == LiveControlCommands.CLOSE) {
+            client.execute(() -> executeLiveChatCommand(client, command, false));
+            return;
+        }
+
+        if (client.player == null || client.getNetworkHandler() == null || !chatCommandsEnabled) {
+            return;
+        }
+
+        if (command == LiveControlCommands.SLEEP && !isNightTime(client)) {
+            client.player.sendMessage(Text.literal("LiveControl ignored Sleep because it is not nighttime."), true);
+            cancelQueuedLiveChatCommands();
+            return;
+        }
+
+        if (!isCommandAvailableInCurrentDimension(command, client.player)) {
+            client.player.sendMessage(Text.literal("LiveControl ignored " + command.displayName() + " in this dimension."), true);
+            cancelQueuedLiveChatCommands();
+            lastLiveChatCommandTime = 0L;
+            return;
+        }
+
+        long now = System.currentTimeMillis();
+        long nextAllowedTime = lastLiveChatCommandTime + LIVE_CHAT_COMMAND_COOLDOWN_MILLIS;
+        if (now < nextAllowedTime) {
+            long remainingSeconds = Math.max(1L, (nextAllowedTime - now + 999L) / 1000L);
+            client.player.sendMessage(Text.literal("LiveControl command cooldown: wait " + remainingSeconds + "s."), true);
+            // Do not let queued chat from an attempted command leak through while on cooldown.
+            cancelQueuedLiveChatCommands();
+            return;
+        }
+
+        // command will run: stop any current queued actions and break/eating state
+        if (client.player != null && client.getNetworkHandler() != null) {
+            sendMinecraftChatMessage(client, "#stop");
+        }
+        cancelQueuedLiveChatCommands();
+        // cancel any in-progress break-hold or eating when a new command starts
+        breakHolding = false;
+        breakHoldTicks = 0;
+        breakTargetPos = null;
+        breakTargetFacing = null;
+        client.options.useKey.setPressed(false);
+        eating = false;
+        eatingStarted = false;
+        eatingTargetSlot = -1;
+        eatingTicks = 0;
+        pendingSleepBedPos = null;
+        sleepPathStarted = false;
+
+        lastLiveChatCommandTime = now;
+        executeLiveChatCommand(client, command, true);
+    }
+
+    private static void executeLiveChatCommand(MinecraftClient client, LiveControlCommands command, boolean rememberCommand) {
+        // handle direct-action commands
+        if (command == LiveControlCommands.JUMP) {
+            if (client.player != null) {
+                client.player.jump();
+                client.player.sendMessage(Text.literal("LiveControl performed a jump."), true);
+            }
+            return;
+        }
+        if (command == LiveControlCommands.OPEN_INVENTORY) {
+            client.execute(() -> {
+                if (client.player != null) {
+                    client.setScreen(new net.minecraft.client.gui.screen.ingame.InventoryScreen(client.player));
+                }
+            });
+            return;
+        }
+        if (command == LiveControlCommands.BREAK) {
+            // Hold break for several ticks to actually break the block.
+            if (client.player != null && client.interactionManager != null) {
+                breakHolding = true;
+                breakHoldTicks = 0;
+                breakTargetPos = client.player.getBlockPos().offset(client.player.getHorizontalFacing());
+                breakTargetFacing = client.player.getHorizontalFacing();
+                client.player.sendMessage(Text.literal("LiveControl starting to break the block in front (holding for 4s)..."), true);
+            }
+            return;
+        }
+
+        if (command == LiveControlCommands.CLOSE) {
+            // Close the current open screen (inventory, chest, chat, etc.) instead of sending a chat fallback.
+            if (client.currentScreen != null) {
+                client.setScreen(null);
+                if (client.player != null) {
+                    client.player.sendMessage(Text.literal("LiveControl closed the current screen."), true);
+                }
+            }
+            return;
+        }
+
+        if (command == LiveControlCommands.SLEEP) {
+            startSleepAutomation(client);
+            return;
+        }
+
+        String[] commandMessages = chatCommandsForCurrentDimension(command, client.player);
+        queueLiveChatCommands(commandMessages);
+        if (rememberCommand && containsNonStopCommand(commandMessages)) {
+            lastExecutedLiveChatCommand = command;
+            lastExecutedLiveChatCommandMessages = Arrays.stream(commandMessages)
+                    .filter(m -> !"#stop".equalsIgnoreCase(m.trim()))
+                    .toArray(String[]::new);
+        }
+        String feedback = commandMessages.length == 1
+                ? commandMessages[0]
+                : command.displayName() + " sequence (" + commandMessages.length + " commands)";
+        client.player.sendMessage(Text.literal("LiveControl ran " + feedback), true);
+    }
+
+    private static void registerCommands() {
+        ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) -> {
+            dispatcher.register(ClientCommandManager.literal("afk")
+                    .executes(context -> {
+                        boolean visible = !LiveControlBossBar.isVisible();
+                        chatCommandsEnabled = visible;
+                        cameraFollowsPlayerMovement = visible;
+                        if (!visible) {
+                            previousCameraFollowPosition = null;
+                        }
+                        setAutoJumpEnabled(visible);
+                        LiveControlBossBar.setVisible(visible);
+                        if (visible) {
+                            restartChatBridges();
+                        } else {
+                            stopChatBridges();
+                        }
+                        if (context.getSource().getPlayer() != null) {
+                            MinecraftClient mc = MinecraftClient.getInstance();
+                            if (mc != null && mc.getNetworkHandler() != null) {
+                                mc.getNetworkHandler().sendChatMessage("#set renderPath false");
+                                mc.getNetworkHandler().sendChatMessage("#set renderGoal false");
+                                mc.getNetworkHandler().sendChatMessage("#blocksToAvoidBreaking crafting_table,furnace,chest,trapped_chest,oak_planks,oak_fence,oak_fence_gate,glass");
+                            }
+                        }
+                        context.getSource().sendFeedback(Text.literal(
+                                visible
+                                        ? "LiveControl AFK boss bar, chat commands, and movement camera follow enabled."
+                                        : "LiveControl AFK boss bar, chat commands, and movement camera follow disabled."
+                        ));
+                        return Command.SINGLE_SUCCESS;
+                    }));
+
+            dispatcher.register(ClientCommandManager.literal("safezone")
+                    .executes(context -> {
+                        ClientPlayerEntity player = context.getSource().getPlayer();
+                        if (player == null) {
+                            return Command.SINGLE_SUCCESS;
+                        }
+
+                        LiveControlConfig currentConfig = config();
+                        String id = UUID.randomUUID().toString();
+                        String name = "SafeZone " + (currentConfig.safeZones.size() + 1);
+                        Vec3d pos = player.getPos();
+                        currentConfig.safeZones.add(new LiveControlConfig.SafeZone(
+                                id,
+                                name,
+                                worldId(player),
+                                pos.x,
+                                pos.y,
+                                pos.z
+                        ));
+                        saveConfig(currentConfig);
+                        context.getSource().sendFeedback(Text.literal("LiveControl saved " + name + " within 20 blocks."));
+                        return Command.SINGLE_SUCCESS;
+                    })
+                    .then(ClientCommandManager.literal("delete")
+                            .executes(context -> {
+                                ClientPlayerEntity player = context.getSource().getPlayer();
+                                if (player == null) {
+                                    return Command.SINGLE_SUCCESS;
+                                }
+
+                                LiveControlConfig currentConfig = config();
+                                LiveControlConfig.SafeZone nearest = nearestSafeZone(player, Double.MAX_VALUE);
+                                if (nearest == null) {
+                                    context.getSource().sendFeedback(Text.literal("LiveControl has no safezones in this dimension."));
+                                    return Command.SINGLE_SUCCESS;
+                                }
+
+                                currentConfig.safeZones.remove(nearest);
+                                saveConfig(currentConfig);
+                                context.getSource().sendFeedback(Text.literal("LiveControl deleted " + safeZoneName(nearest) + "."));
+                                return Command.SINGLE_SUCCESS;
+                            }))
+                    .then(ClientCommandManager.literal("show")
+                            .executes(context -> {
+                                safeZonesVisible = true;
+                                context.getSource().sendFeedback(Text.literal("LiveControl safezone outlines shown."));
+                                return Command.SINGLE_SUCCESS;
+                            }))
+                    .then(ClientCommandManager.literal("hide")
+                            .executes(context -> {
+                                safeZonesVisible = false;
+                                context.getSource().sendFeedback(Text.literal("LiveControl safezone outlines hidden."));
+                                return Command.SINGLE_SUCCESS;
+                            })));
+
+            dispatcher.register(ClientCommandManager.literal("waypoint")
+                    .then(ClientCommandManager.literal("show")
+                            .executes(context -> {
+                                safeZonesVisible = true;
+                                context.getSource().sendFeedback(Text.literal("LiveControl waypoint outlines shown."));
+                                return Command.SINGLE_SUCCESS;
+                            }))
+                    .then(ClientCommandManager.literal("hide")
+                            .executes(context -> {
+                                safeZonesVisible = false;
+                                context.getSource().sendFeedback(Text.literal("LiveControl waypoint outlines hidden."));
+                                return Command.SINGLE_SUCCESS;
+                            })));
+
+            dispatcher.register(ClientCommandManager.literal("back")
+                    .executes(context -> {
+                        goBack();
+                        context.getSource().sendFeedback(Text.literal("LiveControl chat commands and movement camera follow disabled; #stop sent."));
+                        return Command.SINGLE_SUCCESS;
+                    }));
+        });
+    }
+
+    private static void goBack() {
+        chatCommandsEnabled = false;
+        cameraFollowsPlayerMovement = false;
+        previousCameraFollowPosition = null;
+        setAutoJumpEnabled(false);
+        LiveControlBossBar.setVisible(false);
+        stopChatBridges();
+        cancelQueuedLiveChatCommands();
+        rerunLastCommandAfterRespawn = false;
+        pendingHomeAfterNetherPortal = false;
+        pendingSleepBedPos = null;
+        sleepPathStarted = false;
+        safeZoneEscapeMemoryTicks = 0;
+        // stop any automated attack/mob state and pickaxe automation; clear movement keys so the player regains control
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (client != null) {
+            if (client.player != null) {
+                stopMovement(client, client.player);
+            }
+            client.options.useKey.setPressed(false);
+            if (client.currentScreen != null) {
+                client.setScreen(null);
+            }
+        }
+        attackTarget = null;
+        attackBlockedTicks = 0;
+        runningFromMobs = false;
+        obstacleAvoidanceTicks = 0;
+        corneredTicks = 0;
+        sendMinecraftChatMessage("#stop");
+    }
+
+    private static void tickBackOnJoin(MinecraftClient client) {
+        boolean inWorld = client != null && client.player != null && client.getNetworkHandler() != null && client.world != null;
+        if (inWorld && !wasInWorld && !pendingHomeAfterNetherPortal) {
+            goBack();
+        }
+        wasInWorld = inWorld;
+    }
+
+    private static void tickPendingHomeAfterNetherPortal(MinecraftClient client) {
+        if (!pendingHomeAfterNetherPortal || !chatCommandsEnabled || client == null || client.player == null || client.getNetworkHandler() == null) {
+            return;
+        }
+
+        if (client.player.getWorld().getRegistryKey() == World.OVERWORLD) {
+            pendingHomeAfterNetherPortal = false;
+            sendMinecraftChatMessage(client, "#home");
+            client.player.sendMessage(Text.literal("LiveControl ran #home after returning to the Overworld."), true);
+        }
+    }
+
+    private static void tickCombatAutomation(MinecraftClient client) {
+        ClientPlayerEntity player = client.player;
+        if (player == null) {
+            previousHurtTime = 0;
+            attackTarget = null;
+            attackBlockedTicks = 0;
+            runningFromMobs = false;
+            obstacleAvoidanceTicks = 0;
+            corneredTicks = 0;
+            return;
+        }
+
+        // If chat commands are disabled (for example via /back), disable combat/mob automation
+        if (!chatCommandsEnabled) {
+            previousHurtTime = player.hurtTime;
+            attackTarget = null;
+            attackBlockedTicks = 0;
+            runningFromMobs = false;
+            obstacleAvoidanceTicks = 0;
+            corneredTicks = 0;
+            return;
+        }
+
+        if (eating || player.getHungerManager().getFoodLevel() <= LOW_HUNGER_FOOD_LEVEL) {
+            previousHurtTime = player.hurtTime;
+            attackTarget = null;
+            attackBlockedTicks = 0;
+            runningFromMobs = false;
+            stopMovement(client, player);
+            return;
+        }
+
+        if (tickSafeZoneEscape(client, player)) {
+            previousHurtTime = player.hurtTime;
+            return;
+        }
+
+        if (player.hurtTime > previousHurtTime) {
+            Entity attacker = getAttacker(player);
+            if (attacker != null) {
+                beginAutoFight(attacker);
+            }
+        }
+        previousHurtTime = player.hurtTime;
+
+        if (attackTarget != null) {
+            if (tickAttackTarget(client, player)) {
+                return;
+            }
+        }
+
+        // In the Nether, only retaliate after a mob hits first.
+        if (attackTarget == null && !isInNether(player)) {
+            HostileEntity nearest = nearestHostileMob(player, MOB_RUN_START_DISTANCE);
+            if (nearest != null) {
+                beginAutoFight(nearest);
+            }
+        }
+    }
+
+    private static void tickAutoRespawn(MinecraftClient client) {
+        ClientPlayerEntity player = client.player;
+        if (player == null) {
+            wasDead = false;
+            return;
+        }
+
+        boolean dead = !player.isAlive() || player.getHealth() <= 0.0F;
+        if (dead) {
+            if (!wasDead && chatCommandsEnabled && isRunnableCommand(lastExecutedLiveChatCommand)) {
+                rerunLastCommandAfterRespawn = true;
+            }
+            wasDead = true;
+            player.requestRespawn();
+            if (client.currentScreen instanceof DeathScreen) {
+                client.setScreen(null);
+            }
+            return;
+        }
+
+        if (wasDead && rerunLastCommandAfterRespawn && chatCommandsEnabled) {
+            rerunLastCommandAfterRespawn = false;
+            if (isRunnableCommand(lastExecutedLiveChatCommand)) {
+                executeLiveChatCommand(client, lastExecutedLiveChatCommand, false);
+            }
+        }
+        wasDead = false;
+    }
+
+    private static boolean isRunnableCommand(LiveControlCommands command) {
+        if (command == null) return false;
+        return containsNonStopCommand(command.chatCommands());
+    }
+
+    private static boolean isCommandAvailableInCurrentDimension(LiveControlCommands command, ClientPlayerEntity player) {
+        if (command == LiveControlCommands.GOLD && !isInNether(player)) {
+            return false;
+        }
+        return true;
+    }
+
+    private static String[] chatCommandsForCurrentDimension(LiveControlCommands command, ClientPlayerEntity player) {
+        if (command == LiveControlCommands.HOME && isInNether(player)) {
+            pendingHomeAfterNetherPortal = true;
+            return new String[]{"#goto minecraft:nether_portal"};
+        }
+        if (command == LiveControlCommands.WOOD && isInNether(player)) {
+            return new String[]{"#mine minecraft:crimson_stem"};
+        }
+        if (command == LiveControlCommands.STONE && isInNether(player)) {
+            return new String[]{"#mine minecraft:netherrack"};
+        }
+        return command.chatCommands();
+    }
+
+    private static boolean isInNether(ClientPlayerEntity player) {
+        return player != null && player.getWorld().getRegistryKey() == World.NETHER;
+    }
+
+    private static boolean isNightTime(MinecraftClient client) {
+        if (client == null || client.world == null) {
+            return false;
+        }
+
+        long time = client.world.getTimeOfDay() % 24000L;
+        return time >= 12542L && time <= 23458L;
+    }
+
+    private static void startSleepAutomation(MinecraftClient client) {
+        if (client.player == null || client.world == null || client.getNetworkHandler() == null) {
+            return;
+        }
+
+        if (!isNightTime(client)) {
+            client.player.sendMessage(Text.literal("LiveControl ignored Sleep because it is not nighttime."), true);
+            return;
+        }
+
+        BlockPos bedPos = nearestBed(client, client.player, SLEEP_BED_SEARCH_RADIUS);
+        if (bedPos == null) {
+            client.player.sendMessage(Text.literal("LiveControl could not find a nearby bed."), true);
+            return;
+        }
+
+        pendingSleepBedPos = bedPos.toImmutable();
+        sleepPathStarted = false;
+        tickSleepAutomation(client);
+    }
+
+    private static void tickSleepAutomation(MinecraftClient client) {
+        if (pendingSleepBedPos == null) {
+            return;
+        }
+        if (client == null || client.player == null || client.world == null || client.interactionManager == null || client.getNetworkHandler() == null) {
+            pendingSleepBedPos = null;
+            sleepPathStarted = false;
+            return;
+        }
+        if (!chatCommandsEnabled || client.player.isSleeping()) {
+            pendingSleepBedPos = null;
+            sleepPathStarted = false;
+            return;
+        }
+        if (!isNightTime(client)) {
+            pendingSleepBedPos = null;
+            sleepPathStarted = false;
+            client.player.sendMessage(Text.literal("LiveControl stopped Sleep because it is no longer nighttime."), true);
+            return;
+        }
+        if (!(client.world.getBlockState(pendingSleepBedPos).getBlock() instanceof BedBlock)) {
+            pendingSleepBedPos = null;
+            sleepPathStarted = false;
+            client.player.sendMessage(Text.literal("LiveControl stopped Sleep because the bed is gone."), true);
+            return;
+        }
+
+        if (client.player.getPos().squaredDistanceTo(Vec3d.ofCenter(pendingSleepBedPos)) > SLEEP_BED_INTERACT_DISTANCE * SLEEP_BED_INTERACT_DISTANCE) {
+            if (!sleepPathStarted) {
+                sendMinecraftChatMessage(client, "#goto " + pendingSleepBedPos.getX() + " " + pendingSleepBedPos.getY() + " " + pendingSleepBedPos.getZ());
+                client.player.sendMessage(Text.literal("LiveControl going to nearest bed."), true);
+                sleepPathStarted = true;
+            }
+            return;
+        }
+
+        sendMinecraftChatMessage(client, "#stop");
+        stopMovement(client, client.player);
+        facePosition(client.player, Vec3d.ofCenter(pendingSleepBedPos));
+        BlockHitResult hit = new BlockHitResult(Vec3d.ofCenter(pendingSleepBedPos), Direction.UP, pendingSleepBedPos, false);
+        client.interactionManager.interactBlock(client.player, Hand.MAIN_HAND, hit);
+        client.player.swingHand(Hand.MAIN_HAND);
+        pendingSleepBedPos = null;
+        sleepPathStarted = false;
+    }
+
+    private static BlockPos nearestBed(MinecraftClient client, ClientPlayerEntity player, int radius) {
+        BlockPos playerPos = player.getBlockPos();
+        BlockPos nearest = null;
+        double nearestSquaredDistance = Double.MAX_VALUE;
+        for (BlockPos pos : BlockPos.iterate(playerPos.add(-radius, -16, -radius), playerPos.add(radius, 16, radius))) {
+            if (!(client.world.getBlockState(pos).getBlock() instanceof BedBlock)) {
+                continue;
+            }
+
+            double squaredDistance = playerPos.getSquaredDistance(pos);
+            if (squaredDistance < nearestSquaredDistance) {
+                nearest = pos.toImmutable();
+                nearestSquaredDistance = squaredDistance;
+            }
+        }
+        return nearest;
+    }
+
+    private static String worldId(ClientPlayerEntity player) {
+        return player.getWorld().getRegistryKey().getValue().toString();
+    }
+
+    private static String safeZoneName(LiveControlConfig.SafeZone safeZone) {
+        return safeZone.name == null || safeZone.name.isBlank() ? "safezone" : safeZone.name;
+    }
+
+    private static LiveControlConfig.SafeZone nearestSafeZone(ClientPlayerEntity player, double maxDistance) {
+        if (player == null || config().safeZones == null || config().safeZones.isEmpty()) {
+            return null;
+        }
+
+        String currentWorld = worldId(player);
+        double maxSquaredDistance = maxDistance * maxDistance;
+        LiveControlConfig.SafeZone nearest = null;
+        double nearestSquaredDistance = Double.MAX_VALUE;
+        Vec3d playerPos = player.getPos();
+        for (LiveControlConfig.SafeZone safeZone : config().safeZones) {
+            if (safeZone == null || !currentWorld.equals(safeZone.world)) {
+                continue;
+            }
+
+            double radius = safeZone.radius > 0.0D ? safeZone.radius : SAFE_ZONE_RADIUS;
+            double allowedSquaredDistance = maxDistance == Double.MAX_VALUE
+                    ? Double.MAX_VALUE
+                    : Math.min(maxSquaredDistance, radius * radius);
+            double squaredDistance = playerPos.squaredDistanceTo(safeZone.x, safeZone.y, safeZone.z);
+            if (squaredDistance <= allowedSquaredDistance && squaredDistance < nearestSquaredDistance) {
+                nearest = safeZone;
+                nearestSquaredDistance = squaredDistance;
+            }
+        }
+        return nearest;
+    }
+
+    private static List<LiveControlConfig.SafeZone> containingSafeZones(ClientPlayerEntity player) {
+        if (player == null || config().safeZones == null || config().safeZones.isEmpty()) {
+            return List.of();
+        }
+
+        String currentWorld = worldId(player);
+        Vec3d playerPos = player.getPos();
+        return config().safeZones.stream()
+                .filter(safeZone -> safeZone != null && currentWorld.equals(safeZone.world))
+                .filter(safeZone -> {
+                    double radius = safeZone.radius > 0.0D ? safeZone.radius : SAFE_ZONE_RADIUS;
+                    return playerPos.squaredDistanceTo(safeZone.x, safeZone.y, safeZone.z) <= radius * radius;
+                })
+                .toList();
+    }
+
+    private static List<LiveControlConfig.SafeZone> nearbySafeZones(ClientPlayerEntity player, double extraDistance) {
+        if (player == null || config().safeZones == null || config().safeZones.isEmpty()) {
+            return List.of();
+        }
+
+        String currentWorld = worldId(player);
+        Vec3d playerPos = player.getPos();
+        return config().safeZones.stream()
+                .filter(safeZone -> safeZone != null && currentWorld.equals(safeZone.world))
+                .filter(safeZone -> {
+                    double radius = safeZone.radius > 0.0D ? safeZone.radius : SAFE_ZONE_RADIUS;
+                    double triggerDistance = radius + extraDistance;
+                    return playerPos.squaredDistanceTo(safeZone.x, safeZone.y, safeZone.z) <= triggerDistance * triggerDistance;
+                })
+                .toList();
+    }
+
+    private static Vec3d safeZoneClusterCenter(List<LiveControlConfig.SafeZone> safeZones) {
+        if (safeZones.isEmpty()) {
+            return Vec3d.ZERO;
+        }
+
+        double x = 0.0D;
+        double y = 0.0D;
+        double z = 0.0D;
+        for (LiveControlConfig.SafeZone safeZone : safeZones) {
+            x += safeZone.x;
+            y += safeZone.y;
+            z += safeZone.z;
+        }
+        double count = safeZones.size();
+        return new Vec3d(x / count, y / count, z / count);
+    }
+
+    private static boolean tickSafeZoneEscape(MinecraftClient client, ClientPlayerEntity player) {
+        if (safeZoneStopCooldownTicks > 0) {
+            safeZoneStopCooldownTicks--;
+        }
+
+        List<LiveControlConfig.SafeZone> activeSafeZones = containingSafeZones(player);
+        if (!activeSafeZones.isEmpty()) {
+            safeZoneEscapeMemoryTicks = SAFE_ZONE_ESCAPE_MEMORY_TICKS;
+        } else if (safeZoneEscapeMemoryTicks > 0) {
+            safeZoneEscapeMemoryTicks--;
+        }
+
+        List<LiveControlConfig.SafeZone> threatSafeZones = nearbySafeZones(player, SAFE_ZONE_CLEAR_MARGIN + SAFE_ZONE_ESCAPE_LOOKAHEAD_BLOCKS);
+        if (activeSafeZones.isEmpty() && (safeZoneEscapeMemoryTicks <= 0 || threatSafeZones.isEmpty())) {
+            return false;
+        }
+
+        cancelQueuedLiveChatCommands();
+        attackTarget = null;
+        attackBlockedTicks = 0;
+        runningFromMobs = false;
+        if (safeZoneStopCooldownTicks <= 0) {
+            sendMinecraftChatMessage(client, "#stop");
+            List<LiveControlConfig.SafeZone> messageSafeZones = activeSafeZones.isEmpty() ? threatSafeZones : activeSafeZones;
+            String zoneText = messageSafeZones.size() == 1
+                    ? safeZoneName(messageSafeZones.get(0))
+                    : messageSafeZones.size() + " nearby safezones";
+            player.sendMessage(Text.literal("LiveControl avoiding " + zoneText + "."), true);
+            safeZoneStopCooldownTicks = SAFE_ZONE_STOP_COOLDOWN_TICKS;
+        }
+        runAwayFromSafeZones(client, player, threatSafeZones.isEmpty() ? activeSafeZones : threatSafeZones);
+        return true;
+    }
+
+    private static void tickAfkHungerSafety(MinecraftClient client) {
+        if (!chatCommandsEnabled || eating || client == null || client.player == null || client.getNetworkHandler() == null) {
+            return;
+        }
+
+        if (client.player.getHungerManager().getFoodLevel() > LOW_HUNGER_FOOD_LEVEL) {
+            return;
+        }
+
+        int slot = findHotbarItemSlotWithFood(client.player);
+        if (slot < 0) {
+            slot = moveFoodToHotbar(client, client.player);
+        }
+        if (slot < 0) {
+            client.player.sendMessage(Text.literal("LiveControl low hunger, but no food was found."), true);
+            return;
+        }
+
+        cancelQueuedLiveChatCommands();
+        sendMinecraftChatMessage(client, "#stop");
+        stopMovement(client, client.player);
+        eating = true;
+        eatingStarted = false;
+        eatingUsing = false;
+        eatingTargetSlot = -1;
+        eatingTicks = 0;
+        eatingInitialFoodLevel = client.player.getHungerManager().getFoodLevel();
+        client.player.sendMessage(Text.literal("LiveControl paused to eat."), true);
+    }
+
+    private static void tickCameraFollowMovement(MinecraftClient client) {
+        ClientPlayerEntity player = client.player;
+        if (player == null || !cameraFollowsPlayerMovement || !player.isAlive()) {
+            previousCameraFollowPosition = player == null ? null : player.getPos();
+            return;
+        }
+
+        Vec3d currentPosition = player.getPos();
+        if (previousCameraFollowPosition != null) {
+            Vec3d movement = currentPosition.subtract(previousCameraFollowPosition);
+            if (movement.horizontalLengthSquared() > CAMERA_FOLLOW_MOVEMENT_THRESHOLD) {
+                setYawFromVector(player, movement);
+            }
+        }
+        previousCameraFollowPosition = currentPosition;
+    }
+
+    private static void tickPitchRecentering(MinecraftClient client) {
+        ClientPlayerEntity player = client.player;
+        if (player == null || !chatCommandsEnabled) {
+            previousPitch = null;
+            pitchTiltTicks = 0;
+            return;
+        }
+
+        float pitch = player.getPitch();
+        if (previousPitch == null) {
+            previousPitch = pitch;
+            pitchTiltTicks = 0;
+            return;
+        }
+
+        float delta = Math.abs(pitch - previousPitch);
+        if (Math.abs(pitch) > PITCH_TILT_THRESHOLD_DEGREES && delta < 0.5F) {
+            // head remains tilted beyond threshold and fairly stable
+            pitchTiltTicks++;
+        } else {
+            pitchTiltTicks = 0;
+        }
+
+        previousPitch = pitch;
+
+        if (pitchTiltTicks >= PITCH_TILT_TICKS_THRESHOLD) {
+            // recenter pitch (only up/down), keep yaw the same
+            player.setPitch(0.0F);
+            if (client.player != null) {
+                client.player.sendMessage(Text.literal("LiveControl recentred head pitch."), true);
+            }
+            pitchTiltTicks = 0;
+            previousPitch = player.getPitch();
+        }
+    }
+
+    private static Entity getAttacker(ClientPlayerEntity player) {
+        DamageSource damageSource = player.getRecentDamageSource();
+        if (damageSource != null && damageSource.getAttacker() != null) {
+            return damageSource.getAttacker();
+        }
+        return player.getAttacker();
+    }
+
+    private static boolean tickAttackTarget(MinecraftClient client, ClientPlayerEntity player) {
+        if (!isValidAttackTarget(player, attackTarget)) {
+            // if the target died while we were attacking, re-run the last non-#stop command
+            if (attackTarget instanceof LivingEntity living && (!living.isAlive() || living.getHealth() <= 0.0F)) {
+                rerunLastCommandIfAllowed(client);
+            }
+            attackTarget = null;
+            attackBlockedTicks = 0;
+            stopMovement(client, player);
+            return false;
+        }
+
+        double squaredDistance = player.squaredDistanceTo(attackTarget);
+        if (squaredDistance > ATTACK_CANCEL_DISTANCE * ATTACK_CANCEL_DISTANCE) {
+            attackTarget = null;
+            attackBlockedTicks = 0;
+            stopMovement(client, player);
+            return false;
+        }
+
+        boolean hasLineOfSight = hasClearLineOfSight(player, attackTarget);
+        if (!hasLineOfSight) {
+            attackBlockedTicks++;
+            stopMovement(client, player);
+            faceEntity(player, attackTarget);
+            if (attackBlockedTicks >= ATTACK_BLOCKED_CANCEL_TICKS) {
+                attackTarget = null;
+                attackBlockedTicks = 0;
+                rerunLastCommandIfAllowed(client);
+                return false;
+            }
+            return true;
+        }
+        attackBlockedTicks = 0;
+
+        equipBestDamageTool(player);
+        faceEntity(player, attackTarget);
+        if (squaredDistance > ATTACK_REACH_DISTANCE * ATTACK_REACH_DISTANCE) {
+            moveForward(client, player, true);
+        } else {
+            // in melee range: attempt crits by spamming jump and attacking when cooldown ready
+            // ensure movement is stopped to better land crits
+            stopMovement(client, player);
+            // spam jump to attempt critical hits but only when on the ground
+            if (player != null && player.isOnGround()) player.jump();
+            // if attack cooldown is ready, perform attack
+            if (client.interactionManager != null && player.getAttackCooldownProgress(0.0F) >= 1.0F) {
+                client.interactionManager.attackEntity(player, attackTarget);
+                player.swingHand(Hand.MAIN_HAND);
+            }
+        }
+        return true;
+    }
+
+    private static boolean isValidAttackTarget(ClientPlayerEntity player, Entity target) {
+        if (!(target instanceof LivingEntity livingTarget)) {
+            return false;
+        }
+        return target.isAlive()
+                && !target.isRemoved()
+                && livingTarget.getHealth() > 0.0F
+                && target.getWorld() == player.getWorld();
+    }
+
+    private static boolean hasClearLineOfSight(ClientPlayerEntity player, Entity target) {
+        if (player == null || target == null || player.getWorld() == null) {
+            return false;
+        }
+
+        Vec3d start = player.getEyePos();
+        Vec3d end = target.getPos().add(0.0D, target.getHeight() * 0.6D, 0.0D);
+        HitResult hit = player.getWorld().raycast(new RaycastContext(
+                start,
+                end,
+                RaycastContext.ShapeType.COLLIDER,
+                RaycastContext.FluidHandling.NONE,
+                player
+        ));
+        return hit.getType() == HitResult.Type.MISS || hit.getPos().squaredDistanceTo(end) < 1.0D;
+    }
+
+    private static void tickMobEscape(MinecraftClient client, ClientPlayerEntity player) {
+        HostileEntity nearestMob = nearestHostileMob(player, runningFromMobs ? MOB_RUN_STOP_DISTANCE : MOB_RUN_START_DISTANCE);
+        if (nearestMob == null) {
+            if (runningFromMobs) {
+                runningFromMobs = false;
+                obstacleAvoidanceTicks = 0;
+                corneredTicks = 0;
+                stopMovement(client, player);
+            }
+            return;
+        }
+
+        runningFromMobs = true;
+        if (isCorneredByMob(player, nearestMob)) {
+            beginAutoFight(nearestMob);
+            return;
+        }
+        runAwayFrom(client, player, nearestMob);
+    }
+
+    private static HostileEntity nearestHostileMob(ClientPlayerEntity player, double distance) {
+        double squaredDistance = distance * distance;
+        List<HostileEntity> mobs = player.getWorld().getEntitiesByClass(
+                HostileEntity.class,
+                player.getBoundingBox().expand(distance),
+                mob -> mob.isAlive()
+                        && !mob.isRemoved()
+                        && player.squaredDistanceTo(mob) <= squaredDistance
+                        && hasClearLineOfSight(player, mob)
+        );
+        return mobs.stream()
+                .min(Comparator.comparingDouble(player::squaredDistanceTo))
+                .orElse(null);
+    }
+
+    private static void runAwayFrom(MinecraftClient client, ClientPlayerEntity player, Entity threat) {
+        runAwayFromPosition(client, player, threat.getPos());
+    }
+
+    private static void runAwayFromSafeZones(MinecraftClient client, ClientPlayerEntity player, List<LiveControlConfig.SafeZone> safeZones) {
+        Vec3d away = player.getPos().subtract(safeZoneClusterCenter(safeZones));
+        if (away.horizontalLengthSquared() < 1.0E-6D) {
+            away = player.getRotationVector();
+        }
+
+        Vec3d escape = safestEscapeVector(client, player, away, safeZones);
+        setYawFromVector(player, escape);
+        moveForward(client, player, true);
+        client.options.sneakKey.setPressed(escapeDescentDrop(client, player, escape) > 0);
+        Vec3d forward = Vec3d.fromPolar(0.0F, player.getYaw()).normalize().multiply(canSprintSafely(player) ? 0.14D : 0.09D);
+        Vec3d velocity = player.getVelocity();
+        player.setVelocity(forward.x, velocity.y, forward.z);
+    }
+
+    private static Vec3d safestEscapeVector(MinecraftClient client, ClientPlayerEntity player, Vec3d preferred, List<LiveControlConfig.SafeZone> safeZones) {
+        double[] angles = new double[]{0.0D, -20.0D, 20.0D, -45.0D, 45.0D, -70.0D, 70.0D, -110.0D, 110.0D, 160.0D, -160.0D};
+        Vec3d best = preferred;
+        int bestScore = Integer.MIN_VALUE;
+        for (double angle : angles) {
+            Vec3d candidate = rotateHorizontal(preferred, angle);
+            int score = scoreEscapeVector(client, player, candidate, safeZones);
+            if (score > bestScore) {
+                best = candidate;
+                bestScore = score;
+            }
+        }
+        return best;
+    }
+
+    private static int scoreEscapeVector(MinecraftClient client, ClientPlayerEntity player, Vec3d vector, List<LiveControlConfig.SafeZone> safeZones) {
+        if (client.world == null || vector.horizontalLengthSquared() < 1.0E-6D) {
+            return Integer.MIN_VALUE;
+        }
+
+        Vec3d direction = new Vec3d(vector.x, 0.0D, vector.z).normalize();
+        int score = 0;
+        for (int step = 1; step <= SAFE_ZONE_ESCAPE_LOOKAHEAD_BLOCKS; step++) {
+            Vec3d probePos = player.getPos().add(direction.multiply(step));
+            BlockPos probe = BlockPos.ofFloored(probePos);
+            int drop = safeDropDistance(client, probe);
+            if (drop < 0) {
+                return Integer.MIN_VALUE + step;
+            }
+
+            int zonesStillInside = 0;
+            double nearestEdgeDistance = Double.MAX_VALUE;
+            for (LiveControlConfig.SafeZone safeZone : safeZones) {
+                double radius = safeZone.radius > 0.0D ? safeZone.radius : SAFE_ZONE_RADIUS;
+                double distance = Math.sqrt(probePos.squaredDistanceTo(safeZone.x, safeZone.y, safeZone.z));
+                double edgeDistance = distance - radius;
+                nearestEdgeDistance = Math.min(nearestEdgeDistance, edgeDistance);
+                if (edgeDistance < 0.0D) {
+                    zonesStillInside++;
+                }
+            }
+
+            score += 20 - drop * 6 - zonesStillInside * 45;
+            score += (int) Math.max(-40.0D, Math.min(40.0D, nearestEdgeDistance * 3.0D));
+            if (drop == 0) {
+                score += 4;
+            }
+        }
+        return score;
+    }
+
+    private static int escapeDescentDrop(MinecraftClient client, ClientPlayerEntity player, Vec3d vector) {
+        if (client.world == null || vector.horizontalLengthSquared() < 1.0E-6D) {
+            return 0;
+        }
+        Vec3d direction = new Vec3d(vector.x, 0.0D, vector.z).normalize();
+        return Math.max(0, safeDropDistance(client, BlockPos.ofFloored(player.getPos().add(direction))));
+    }
+
+    private static int safeDropDistance(MinecraftClient client, BlockPos pos) {
+        for (int drop = 0; drop <= SAFE_ZONE_MAX_DESCENT_DROP; drop++) {
+            BlockPos feet = pos.down(drop);
+            BlockPos head = feet.up();
+            BlockPos ground = feet.down();
+            BlockState feetState = client.world.getBlockState(feet);
+            BlockState headState = client.world.getBlockState(head);
+            BlockState groundState = client.world.getBlockState(ground);
+            if (!feetState.getCollisionShape(client.world, feet).isEmpty() || !headState.getCollisionShape(client.world, head).isEmpty()) {
+                continue;
+            }
+            if (!groundState.getCollisionShape(client.world, ground).isEmpty() && isSafeBlockToStandOn(groundState)) {
+                return drop;
+            }
+        }
+        return -1;
+    }
+
+    private static boolean isSafeBlockToStandOn(BlockState state) {
+        return !state.isOf(Blocks.LAVA)
+                && !state.isOf(Blocks.FIRE)
+                && !state.isOf(Blocks.SOUL_FIRE)
+                && !state.isOf(Blocks.CACTUS)
+                && !state.isOf(Blocks.MAGMA_BLOCK)
+                && !state.isOf(Blocks.CAMPFIRE)
+                && !state.isOf(Blocks.SOUL_CAMPFIRE);
+    }
+
+    private static void runAwayFromPosition(MinecraftClient client, ClientPlayerEntity player, Vec3d threatPos) {
+        Vec3d away = player.getPos().subtract(threatPos);
+        if (away.horizontalLengthSquared() < 1.0E-6D) {
+            away = player.getRotationVector();
+        }
+
+        Vec3d escape = away;
+        if (player.horizontalCollision || obstacleAvoidanceTicks > 0) {
+            if (obstacleAvoidanceTicks <= 0) {
+                obstacleAvoidanceDirection = -obstacleAvoidanceDirection;
+                obstacleAvoidanceTicks = OBSTACLE_AVOIDANCE_TICKS;
+            } else {
+                obstacleAvoidanceTicks--;
+            }
+            escape = rotateHorizontal(away, obstacleAvoidanceDirection * 55.0D);
+        }
+
+        setYawFromVector(player, escape);
+        moveForward(client, player, true);
+        Vec3d forward = Vec3d.fromPolar(0.0F, player.getYaw()).normalize().multiply(canSprintSafely(player) ? 0.18D : 0.10D);
+        Vec3d velocity = player.getVelocity();
+        player.setVelocity(forward.x, velocity.y, forward.z);
+    }
+
+    private static boolean isCorneredByMob(ClientPlayerEntity player, Entity threat) {
+        if (player.squaredDistanceTo(threat) > MOB_CORNERED_ATTACK_DISTANCE * MOB_CORNERED_ATTACK_DISTANCE) {
+            corneredTicks = 0;
+            return false;
+        }
+
+        if (player.horizontalCollision) {
+            corneredTicks++;
+        } else {
+            corneredTicks = 0;
+        }
+        return corneredTicks >= CORNERED_ATTACK_TICKS;
+    }
+
+    private static Vec3d rotateHorizontal(Vec3d vector, double degrees) {
+        double radians = Math.toRadians(degrees);
+        double cos = Math.cos(radians);
+        double sin = Math.sin(radians);
+        return new Vec3d(vector.x * cos - vector.z * sin, vector.y, vector.x * sin + vector.z * cos);
+    }
+
+    private static void faceEntity(ClientPlayerEntity player, Entity entity) {
+        Vec3d toward = entity.getPos().subtract(player.getPos());
+        setYawFromVector(player, toward);
+    }
+
+    private static void facePosition(ClientPlayerEntity player, Vec3d position) {
+        Vec3d toward = position.subtract(player.getEyePos());
+        setYawFromVector(player, toward);
+        double horizontalDistance = Math.sqrt(toward.x * toward.x + toward.z * toward.z);
+        player.setPitch((float) (-Math.toDegrees(Math.atan2(toward.y, horizontalDistance))));
+    }
+
+    private static void setYawFromVector(ClientPlayerEntity player, Vec3d vector) {
+        player.setYaw((float) (Math.toDegrees(Math.atan2(vector.z, vector.x)) - 90.0D));
+    }
+
+    private static void moveForward(MinecraftClient client, ClientPlayerEntity player, boolean sprinting) {
+        sprinting = sprinting && canSprintSafely(player);
+        player.setSprinting(sprinting);
+        client.options.forwardKey.setPressed(true);
+        client.options.sprintKey.setPressed(sprinting);
+        client.options.sneakKey.setPressed(false);
+        client.options.backKey.setPressed(false);
+        client.options.leftKey.setPressed(false);
+        client.options.rightKey.setPressed(false);
+        player.input.pressingForward = true;
+        player.input.pressingBack = false;
+        player.input.pressingLeft = false;
+        player.input.pressingRight = false;
+        player.input.movementForward = 1.0F;
+        player.input.movementSideways = 0.0F;
+    }
+
+    private static boolean canSprintSafely(ClientPlayerEntity player) {
+        return player != null && player.getHungerManager().getFoodLevel() > LOW_HUNGER_FOOD_LEVEL;
+    }
+
+    private static void stopMovement(MinecraftClient client, ClientPlayerEntity player) {
+        client.options.forwardKey.setPressed(false);
+        client.options.sprintKey.setPressed(false);
+        client.options.sneakKey.setPressed(false);
+        client.options.backKey.setPressed(false);
+        client.options.leftKey.setPressed(false);
+        client.options.rightKey.setPressed(false);
+        player.setSprinting(false);
+        player.input.pressingForward = false;
+        player.input.pressingBack = false;
+        player.input.pressingLeft = false;
+        player.input.pressingRight = false;
+        player.input.movementForward = 0.0F;
+        player.input.movementSideways = 0.0F;
+    }
+
+
+    private static void equipBestDamageTool(ClientPlayerEntity player) {
+        int bestSlot = player.getInventory().selectedSlot;
+        double bestDamage = attackDamage(player.getInventory().getStack(bestSlot));
+        for (int slot = 0; slot < 9; slot++) {
+            ItemStack stack = player.getInventory().getStack(slot);
+            if (stack.isEmpty()) {
+                continue;
+            }
+
+            double damage = attackDamage(stack);
+            if (damage > bestDamage) {
+                bestDamage = damage;
+                bestSlot = slot;
+            }
+        }
+
+        if (bestSlot != player.getInventory().selectedSlot) {
+            player.getInventory().selectedSlot = bestSlot;
+            if (player.networkHandler != null) {
+                player.networkHandler.sendPacket(new UpdateSelectedSlotC2SPacket(bestSlot));
+            }
+        }
+    }
+
+    private static double attackDamage(ItemStack stack) {
+        if (stack.isEmpty()) {
+            return 0.0D;
+        }
+
+        double damage = 1.0D;
+        for (EntityAttributeModifier modifier : stack.getAttributeModifiers(net.minecraft.entity.EquipmentSlot.MAINHAND).get(EntityAttributes.GENERIC_ATTACK_DAMAGE)) {
+            damage = switch (modifier.getOperation()) {
+                case ADDITION -> damage + modifier.getValue();
+                case MULTIPLY_BASE -> damage + 1.0D * modifier.getValue();
+                case MULTIPLY_TOTAL -> damage * (1.0D + modifier.getValue());
+            };
+        }
+        return damage;
+    }
+
+    private static void beginAutoFight(Entity target) {
+        cancelQueuedLiveChatCommands();
+        sendMinecraftChatMessage("#stop");
+        attackTarget = target;
+        attackBlockedTicks = 0;
+        runningFromMobs = false;
+        obstacleAvoidanceTicks = 0;
+        corneredTicks = 0;
+    }
+
+    private static void setAutoJumpEnabled(boolean enabled) {
+        pendingAutoJumpEnabled = enabled;
+        applyPendingAutoJumpSetting(MinecraftClient.getInstance());
+    }
+
+    private static void renderSafeZones(net.fabricmc.fabric.api.client.rendering.v1.WorldRenderContext context) {
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (!safeZonesVisible || client == null || client.player == null || context.world() == null || context.consumers() == null) {
+            return;
+        }
+        if (config().safeZones == null || config().safeZones.isEmpty()) {
+            return;
+        }
+
+        String currentWorld = worldId(client.player);
+        Vec3d cameraPos = context.camera().getPos();
+        MatrixStack matrices = context.matrixStack();
+        VertexConsumer lines = context.consumers().getBuffer(RenderLayer.getLines());
+
+        matrices.push();
+        matrices.translate(-cameraPos.x, -cameraPos.y, -cameraPos.z);
+        for (LiveControlConfig.SafeZone safeZone : config().safeZones) {
+            if (safeZone == null || !currentWorld.equals(safeZone.world)) {
+                continue;
+            }
+            Vec3d zoneCenter = new Vec3d(safeZone.x, safeZone.y, safeZone.z);
+            if (client.player.getPos().squaredDistanceTo(zoneCenter) > SAFE_ZONE_RENDER_DISTANCE * SAFE_ZONE_RENDER_DISTANCE) {
+                continue;
+            }
+
+            double radius = safeZone.radius > 0.0D ? safeZone.radius : SAFE_ZONE_RADIUS;
+            WorldRenderer.drawBox(
+                    matrices,
+                    lines,
+                    safeZone.x - radius, safeZone.y - radius, safeZone.z - radius,
+                    safeZone.x + radius, safeZone.y + radius, safeZone.z + radius,
+                    1.0F, 1.0F, 1.0F, 0.9F
+            );
+            WorldRenderer.drawBox(
+                    matrices,
+                    lines,
+                    safeZone.x - 0.5D, safeZone.y - 0.5D, safeZone.z - 0.5D,
+                    safeZone.x + 0.5D, safeZone.y + 0.5D, safeZone.z + 0.5D,
+                    1.0F, 1.0F, 1.0F, 1.0F
+            );
+        }
+        matrices.pop();
+    }
+
+    private static void applyPendingAutoJumpSetting(MinecraftClient client) {
+        if (pendingAutoJumpEnabled == null || client == null || client.options == null) {
+            return;
+        }
+
+        client.options.getAutoJump().setValue(pendingAutoJumpEnabled);
+        pendingAutoJumpEnabled = null;
+    }
+
+
+
+
+    private static boolean tryCraftItem(MinecraftClient client, ScreenHandler handler, Item item) {
+        return tryCraftRecipe(client, handler, recipe -> recipe.getOutput(client.world.getRegistryManager()).isOf(item));
+    }
+
+    private static boolean tryCraftTaggedOutput(MinecraftClient client, ScreenHandler handler, net.minecraft.registry.tag.TagKey<Item> tag) {
+        return tryCraftRecipe(client, handler, recipe -> recipe.getOutput(client.world.getRegistryManager()).isIn(tag));
+    }
+
+    private static boolean tryCraftRecipe(MinecraftClient client, ScreenHandler handler, java.util.function.Predicate<Recipe<?>> predicate) {
+        if (client.interactionManager == null || client.player == null || client.getNetworkHandler() == null || client.world == null) {
+            return false;
+        }
+
+        for (Recipe<?> recipe : client.getNetworkHandler().getRecipeManager().listAllOfType(RecipeType.CRAFTING)) {
+            if (!predicate.test(recipe)) {
+                continue;
+            }
+            client.interactionManager.clickRecipe(handler.syncId, recipe, false);
+            client.interactionManager.clickSlot(handler.syncId, 0, 0, SlotActionType.QUICK_MOVE, client.player);
+            return true;
+        }
+        return false;
+    }
+
+    private static boolean openNearbyCraftingTable(MinecraftClient client, ClientPlayerEntity player) {
+        BlockPos playerPos = player.getBlockPos();
+        for (BlockPos pos : BlockPos.iterate(playerPos.add(-4, -2, -4), playerPos.add(4, 2, 4))) {
+            if (!client.world.getBlockState(pos).isOf(Blocks.CRAFTING_TABLE)) {
+                continue;
+            }
+            BlockHitResult hit = new BlockHitResult(Vec3d.ofCenter(pos), Direction.UP, pos.toImmutable(), false);
+            client.interactionManager.interactBlock(player, Hand.MAIN_HAND, hit);
+            return true;
+        }
+        return false;
+    }
+
+    private static void placeCraftingTable(MinecraftClient client, ClientPlayerEntity player) {
+        int tableSlot = findHotbarItem(player, Items.CRAFTING_TABLE);
+        if (tableSlot < 0) {
+            tableSlot = moveItemToHotbar(client, player, Items.CRAFTING_TABLE);
+        }
+        if (tableSlot < 0) {
+            return;
+        }
+
+        int previousSlot = player.getInventory().selectedSlot;
+        player.getInventory().selectedSlot = tableSlot;
+        player.networkHandler.sendPacket(new UpdateSelectedSlotC2SPacket(tableSlot));
+        BlockPos support = player.getBlockPos().down();
+        BlockPos placePos = support.up();
+        if (!client.world.getBlockState(placePos).isAir()) {
+            support = player.getBlockPos().offset(player.getHorizontalFacing()).down();
+        }
+        BlockHitResult hit = new BlockHitResult(Vec3d.ofCenter(support).add(0.0D, 0.5D, 0.0D), Direction.UP, support, false);
+        client.interactionManager.interactBlock(player, Hand.MAIN_HAND, hit);
+        player.getInventory().selectedSlot = previousSlot;
+        player.networkHandler.sendPacket(new UpdateSelectedSlotC2SPacket(previousSlot));
+    }
+
+    private static int moveItemToHotbar(MinecraftClient client, ClientPlayerEntity player, Item item) {
+        int inventorySlot = findInventoryItem(player, item);
+        if (inventorySlot < 0 || client.interactionManager == null) {
+            return -1;
+        }
+
+        int hotbarSlot = firstEmptyHotbarSlot(player);
+        if (hotbarSlot < 0) {
+            hotbarSlot = player.getInventory().selectedSlot;
+        }
+        client.interactionManager.clickSlot(player.currentScreenHandler.syncId, inventorySlotToScreenSlot(inventorySlot), hotbarSlot, SlotActionType.SWAP, player);
+        return hotbarSlot;
+    }
+
+    private static int inventorySlotToScreenSlot(int inventorySlot) {
+        return inventorySlot < 9 ? 36 + inventorySlot : inventorySlot;
+    }
+
+    private static int findInventoryItem(ClientPlayerEntity player, Item item) {
+        for (int slot = 0; slot < player.getInventory().size(); slot++) {
+            if (player.getInventory().getStack(slot).isOf(item)) {
+                return slot;
+            }
+        }
+        return -1;
+    }
+
+    private static int firstEmptyHotbarSlot(ClientPlayerEntity player) {
+        for (int slot = 0; slot < 9; slot++) {
+            if (player.getInventory().getStack(slot).isEmpty()) {
+                return slot;
+            }
+        }
+        return -1;
+    }
+
+    private static boolean hasPickaxe(ClientPlayerEntity player) {
+        for (int slot = 0; slot < player.getInventory().size(); slot++) {
+            if (player.getInventory().getStack(slot).getItem() instanceof PickaxeItem) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean hasItem(ClientPlayerEntity player, Item item) {
+        return countItem(player, item) > 0;
+    }
+
+    private static int countItem(ClientPlayerEntity player, Item item) {
+        int count = 0;
+        for (int slot = 0; slot < player.getInventory().size(); slot++) {
+            ItemStack stack = player.getInventory().getStack(slot);
+            if (stack.isOf(item)) {
+                count += stack.getCount();
+            }
+        }
+        return count;
+    }
+
+    private static int countTagged(ClientPlayerEntity player, net.minecraft.registry.tag.TagKey<Item> tag) {
+        int count = 0;
+        for (int slot = 0; slot < player.getInventory().size(); slot++) {
+            ItemStack stack = player.getInventory().getStack(slot);
+            if (stack.isIn(tag)) {
+                count += stack.getCount();
+            }
+        }
+        return count;
+    }
+
+    private static int findHotbarItem(ClientPlayerEntity player, Item item) {
+        for (int slot = 0; slot < 9; slot++) {
+            if (player.getInventory().getStack(slot).isOf(item)) {
+                return slot;
+            }
+        }
+        return -1;
+    }
+
+    private static boolean containsNonStopCommand(String[] messages) {
+        return Arrays.stream(messages).anyMatch(message -> !"#stop".equalsIgnoreCase(message.trim()));
+    }
+
+    private static void tickQueuedLiveChatCommands(MinecraftClient client) {
+        if (queuedLiveChatCommands.isEmpty()) {
+            return;
+        }
+
+        if (queuedLiveChatCommandTicks > 0) {
+            queuedLiveChatCommandTicks--;
+            return;
+        }
+
+        String message = queuedLiveChatCommands.poll();
+        sendMinecraftChatMessage(client, message);
+        queuedLiveChatCommandTicks = COMMAND_SEQUENCE_DELAY_TICKS;
+    }
+
+    // handle break-holding behavior each tick
+    private static void tickBreakHolding(MinecraftClient client) {
+        if (!breakHolding) return;
+        if (client.player == null || client.interactionManager == null || breakTargetPos == null || breakTargetFacing == null) {
+            breakHolding = false;
+            breakHoldTicks = 0;
+            breakTargetPos = null;
+            breakTargetFacing = null;
+            return;
+        }
+
+        // If player moved away from the target, cancel
+        if (!client.player.getBlockPos().offset(client.player.getHorizontalFacing()).equals(breakTargetPos)) {
+            // allow small mismatch, but if too far reset
+        }
+
+        // continue sending attackBlock to hold breaking
+        try {
+            client.interactionManager.attackBlock(breakTargetPos, breakTargetFacing);
+        } catch (NoSuchMethodError | AbstractMethodError ignored) {
+            // fallback: send chat fallback once and cancel
+            sendMinecraftChatMessage(client, "#break");
+            breakHolding = false;
+            breakHoldTicks = 0;
+            breakTargetPos = null;
+            breakTargetFacing = null;
+            return;
+        }
+        breakHoldTicks++;
+        client.player.swingHand(Hand.MAIN_HAND);
+
+        if (breakHoldTicks >= BREAK_HOLD_TICKS_REQUIRED) {
+            // finished breaking attempt
+            if (client.player != null) client.player.sendMessage(Text.literal("LiveControl finished breaking."), true);
+            breakHolding = false;
+            breakHoldTicks = 0;
+            breakTargetPos = null;
+            breakTargetFacing = null;
+        }
+    }
+
+    private static void queueLastExecutedMessages() {
+        cancelQueuedLiveChatCommands();
+        if (lastExecutedLiveChatCommandMessages != null && lastExecutedLiveChatCommandMessages.length > 0) {
+            queuedLiveChatCommands.addAll(Arrays.asList(lastExecutedLiveChatCommandMessages));
+            queuedLiveChatCommandTicks = 0;
+            // trigger immediately on the next tick
+            tickQueuedLiveChatCommands(MinecraftClient.getInstance());
+        }
+    }
+
+    private static void rerunLastCommandIfAllowed(MinecraftClient client) {
+        if (client == null || client.player == null || client.getNetworkHandler() == null) {
+            return;
+        }
+        if (!chatCommandsEnabled) {
+            return;
+        }
+        if (!isRunnableCommand(lastExecutedLiveChatCommand)) {
+            return;
+        }
+        queueLastExecutedMessages();
+    }
+
+    private static void queueLiveChatCommands(String[] messages) {
+        cancelQueuedLiveChatCommands();
+        queuedLiveChatCommands.addAll(Arrays.asList(messages));
+        queuedLiveChatCommandTicks = 0;
+        tickQueuedLiveChatCommands(MinecraftClient.getInstance());
+    }
+
+    private static void cancelQueuedLiveChatCommands() {
+        queuedLiveChatCommands.clear();
+        queuedLiveChatCommandTicks = 0;
+    }
+
+    private static void sendMinecraftChatMessage(String message) {
+        sendMinecraftChatMessage(MinecraftClient.getInstance(), message);
+    }
+
+    private static void sendMinecraftChatMessage(MinecraftClient client, String message) {
+        if (client.player == null || client.getNetworkHandler() == null) {
+            return;
+        }
+
+        client.getNetworkHandler().sendChatMessage(message);
+    }
+}
