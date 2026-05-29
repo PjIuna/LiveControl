@@ -34,12 +34,13 @@ While AFK, viewers can control your player directly through livestream chat usin
 
 | Chat Command | Action                                                |
 | ------------ | ----------------------------------------------------- |
-| `Stone`      | Mines stone                                           |
+| `Mine`       | Mines ores                                            |
 | `Wood`       | Collects wood                                         |
 | `Jump`       | Makes the player jump                                 |
 | `Inventory`  | Opens inventory                                       |
 | `Explore`    | Explores the area                                     |
 | `Loot`       | Searches for loot                                     |
+| `Sleep`      | Go to the nearest bed and sleep                       |
 | `Farm`       | Starts farming                                        |
 | `Nether`     | Travel in and out of the Nether                       |
 | `Gold`       | **Nether-only command** that mines gold in the Nether |
