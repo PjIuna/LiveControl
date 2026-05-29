@@ -1,4 +1,4 @@
-package com.livecontrol.client;
+﻿package com.livecontrol.client;
 
 import com.mojang.brigadier.Command;
 import net.fabricmc.api.ClientModInitializer;
@@ -115,7 +115,6 @@ public final class LiveControlClient implements ClientModInitializer {
     private static boolean wasDead;
     private static boolean wasInWorld;
     private static boolean pendingHomeAfterNetherPortal;
-    private static Vec3d previousPlayerPos = null;
     // breaking state when holding the break action for several ticks
     private static boolean breakHolding = false;
     private static int breakHoldTicks = 0;

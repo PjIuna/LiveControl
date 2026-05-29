@@ -1,4 +1,4 @@
-package com.livecontrol.client;
+﻿package com.livecontrol.client;
 
 import com.mojang.brigadier.Command;
 import net.fabricmc.api.ClientModInitializer;
@@ -115,7 +115,6 @@ public final class LiveControlClient implements ClientModInitializer {
     private static boolean wasDead;
     private static boolean wasInWorld;
     private static boolean pendingHomeAfterNetherPortal;
-    private static Vec3d previousPlayerPos = null;
     // breaking state when holding the break action for several ticks
     private static boolean breakHolding = false;
     private static int breakHoldTicks = 0;
@@ -134,8 +133,6 @@ public final class LiveControlClient implements ClientModInitializer {
     private static int safeZoneStopCooldownTicks = 0;
     private static int safeZoneEscapeMemoryTicks = 0;
     private static final Set<String> safeZoneEscapeClusterIds = new HashSet<>();
-    private static Vec3d safeZoneEscapeTargetCenter = null;
-    private static double safeZoneEscapeTargetClearRadius = 0.0D;
     private static BlockPos pendingSleepBedPos = null;
     private static boolean sleepPathStarted = false;
     private static boolean safeZonesVisible = false;
@@ -980,6 +977,7 @@ public final class LiveControlClient implements ClientModInitializer {
         if (safeZoneStopCooldownTicks > 0) {
             safeZoneStopCooldownTicks--;
         }
+
         List<LiveControlConfig.SafeZone> activeSafeZones = containingSafeZones(player);
         if (!activeSafeZones.isEmpty()) {
             safeZoneEscapeMemoryTicks = SAFE_ZONE_ESCAPE_MEMORY_TICKS;
@@ -988,49 +986,24 @@ public final class LiveControlClient implements ClientModInitializer {
         }
 
         List<LiveControlConfig.SafeZone> threatSafeZones = nearbySafeZones(player, SAFE_ZONE_CLEAR_MARGIN + SAFE_ZONE_ESCAPE_LOOKAHEAD_BLOCKS);
-        List<LiveControlConfig.SafeZone> messageSafeZones = activeSafeZones.isEmpty() ? threatSafeZones : activeSafeZones;
-
-        // If there are no relevant safezones and no escape target, nothing to do
-        if (messageSafeZones.isEmpty() && safeZoneEscapeTargetCenter == null) {
+        if (activeSafeZones.isEmpty() && (safeZoneEscapeMemoryTicks <= 0 || threatSafeZones.isEmpty())) {
             return false;
         }
 
-        // If starting a new escape, record the cluster center and a clear radius to avoid re-entering
-        if (safeZoneEscapeTargetCenter == null && !messageSafeZones.isEmpty()) {
-            safeZoneEscapeTargetCenter = safeZoneClusterCenter(messageSafeZones);
-            double maxRadius = messageSafeZones.stream()
-                    .mapToDouble(sz -> sz.radius > 0.0D ? sz.radius : SAFE_ZONE_RADIUS)
-                    .max().orElse(SAFE_ZONE_RADIUS);
-            safeZoneEscapeTargetClearRadius = maxRadius + SAFE_ZONE_CLEAR_MARGIN;
-        }
-
-        // If we have an escape target, check whether we've cleared it; if so, stop escaping
-        if (safeZoneEscapeTargetCenter != null) {
-            double clearedDistanceSq = safeZoneEscapeTargetClearRadius * safeZoneEscapeTargetClearRadius;
-            if (player.getPos().squaredDistanceTo(safeZoneEscapeTargetCenter) > clearedDistanceSq) {
-                // cleared the cluster: reset escape state
-                safeZoneEscapeTargetCenter = null;
-                safeZoneEscapeTargetClearRadius = 0.0D;
-                safeZoneEscapeMemoryTicks = 0;
-                return false;
-            }
-        }
-
-        // Still escaping: cancel actions and steer away
         cancelQueuedLiveChatCommands();
         attackTarget = null;
         attackBlockedTicks = 0;
         runningFromMobs = false;
         if (safeZoneStopCooldownTicks <= 0) {
             sendMinecraftChatMessage(client, "#stop");
+            List<LiveControlConfig.SafeZone> messageSafeZones = activeSafeZones.isEmpty() ? threatSafeZones : activeSafeZones;
             String zoneText = messageSafeZones.size() == 1
                     ? safeZoneName(messageSafeZones.get(0))
                     : messageSafeZones.size() + " nearby safezones";
             player.sendMessage(Text.literal("LiveControl avoiding " + zoneText + "."), true);
             safeZoneStopCooldownTicks = SAFE_ZONE_STOP_COOLDOWN_TICKS;
         }
-
-        runAwayFromSafeZones(client, player, messageSafeZones);
+        runAwayFromSafeZones(client, player, threatSafeZones.isEmpty() ? activeSafeZones : threatSafeZones);
         return true;
     }
 
@@ -1246,30 +1219,12 @@ public final class LiveControlClient implements ClientModInitializer {
     }
 
     private static void runAwayFromSafeZones(MinecraftClient client, ClientPlayerEntity player, List<LiveControlConfig.SafeZone> safeZones) {
-        Vec3d away;
-        // If called with an empty safeZones list but an escape cluster has been recorded, use that center
-        if ((safeZones == null || safeZones.isEmpty()) && safeZoneEscapeTargetCenter != null) {
-            away = player.getPos().subtract(safeZoneEscapeTargetCenter);
-        } else {
-            away = player.getPos().subtract(safeZoneClusterCenter(safeZones));
-        }
-
+        Vec3d away = player.getPos().subtract(safeZoneClusterCenter(safeZones));
         if (away.horizontalLengthSquared() < 1.0E-6D) {
             away = player.getRotationVector();
         }
 
-        // Prefer running opposite the player's most recent movement when starting to escape
-        Vec3d preferred = away;
-        if (previousPlayerPos != null) {
-            Vec3d lastMovement = player.getPos().subtract(previousPlayerPos);
-            if (lastMovement.horizontalLengthSquared() >= 1.0E-6D) {
-                preferred = lastMovement.multiply(-1.0D);
-            }
-        }
-
-        // Use the preferred vector unless it's effectively zero, otherwise fall back to the away vector
-        Vec3d escape = preferred.horizontalLengthSquared() >= 1.0E-6D ? preferred : away;
-
+        Vec3d escape = safestEscapeVector(client, player, away, safeZones);
         setYawFromVector(player, escape);
         moveForward(client, player, true);
         client.options.sneakKey.setPressed(escapeDescentDrop(client, player, escape) > 0);
