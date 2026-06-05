@@ -106,10 +106,8 @@ public final class TwitchChatBridge {
             return;
         }
 
-        LiveControlCommands.fromChatMessage(message).ifPresent(command -> {
-            MinecraftClient client = MinecraftClient.getInstance();
-            client.execute(() -> LiveControlClient.runLiveChatCommand(command));
-        });
+        MinecraftClient client = MinecraftClient.getInstance();
+        client.execute(() -> LiveControlClient.handleChatMessage(message));
     }
 
     private void closeSocket() {

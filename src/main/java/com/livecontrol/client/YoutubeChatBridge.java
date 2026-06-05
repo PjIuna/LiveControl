@@ -402,10 +402,8 @@ public final class YoutubeChatBridge {
             return;
         }
 
-        LiveControlCommands.fromChatMessage(displayMessage).ifPresent(command -> {
-            MinecraftClient client = MinecraftClient.getInstance();
-            client.execute(() -> LiveControlClient.runLiveChatCommand(command));
-        });
+        MinecraftClient client = MinecraftClient.getInstance();
+        client.execute(() -> LiveControlClient.handleChatMessage(displayMessage));
     }
 
     private static final class StreamState {

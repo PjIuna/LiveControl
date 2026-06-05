@@ -88,6 +88,8 @@ public final class LiveControlClient implements ClientModInitializer {
     private static final int LOW_HUNGER_FOOD_LEVEL = 6;
     private static final int SLEEP_BED_SEARCH_RADIUS = 200;
     private static final double SLEEP_BED_INTERACT_DISTANCE = 3.5D;
+    private static final int CRAFTING_TABLE_SEARCH_RADIUS = 96;
+    private static final double CRAFTING_TABLE_INTERACT_DISTANCE = 3.5D;
     private static final int SAFE_ZONE_MAX_DESCENT_DROP = 3;
     private static final int SAFE_ZONE_ESCAPE_LOOKAHEAD_BLOCKS = 16;
     private static final int SAFE_ZONE_RENDER_DISTANCE = 50;
@@ -139,6 +141,41 @@ public final class LiveControlClient implements ClientModInitializer {
     private static BlockPos pendingSleepBedPos = null;
     private static boolean sleepPathStarted = false;
     private static boolean safeZonesVisible = false;
+    private static BlockPos pendingCraftingTablePos = null;
+    private static boolean craftPathStarted = false;
+    private static boolean craftModeActive = false;
+
+    private enum CraftTool {
+        PICKAXE("Pickaxe", new Item[]{
+                Items.DIAMOND_PICKAXE,
+                Items.IRON_PICKAXE,
+                Items.STONE_PICKAXE,
+                Items.GOLDEN_PICKAXE,
+                Items.WOODEN_PICKAXE
+        }),
+        AXE("Axe", new Item[]{
+                Items.DIAMOND_AXE,
+                Items.IRON_AXE,
+                Items.STONE_AXE,
+                Items.GOLDEN_AXE,
+                Items.WOODEN_AXE
+        }),
+        SWORD("Sword", new Item[]{
+                Items.DIAMOND_SWORD,
+                Items.IRON_SWORD,
+                Items.STONE_SWORD,
+                Items.GOLDEN_SWORD,
+                Items.WOODEN_SWORD
+        });
+
+        private final String displayName;
+        private final Item[] outputs;
+
+        CraftTool(String displayName, Item[] outputs) {
+            this.displayName = displayName;
+            this.outputs = outputs;
+        }
+    }
 
 
     @Override
@@ -156,6 +193,7 @@ public final class LiveControlClient implements ClientModInitializer {
             tickPitchRecentering(client);
             tickAfkHungerSafety(client);
             tickSleepAutomation(client);
+            tickCraftingTableAutomation(client);
             tickQueuedLiveChatCommands(client);
             tickBreakHolding(client);
             tickEating(client);
@@ -318,6 +356,21 @@ public final class LiveControlClient implements ClientModInitializer {
         if (normalized.isBlank()) return;
 
         String lower = normalized.toLowerCase(Locale.ROOT);
+        if (lower.equals("pickaxe") || lower.equals("#pickaxe")) {
+            MinecraftClient client = MinecraftClient.getInstance();
+            client.execute(() -> craftRequestedTool(client, CraftTool.PICKAXE));
+            return;
+        }
+        if (lower.equals("axe") || lower.equals("#axe")) {
+            MinecraftClient client = MinecraftClient.getInstance();
+            client.execute(() -> craftRequestedTool(client, CraftTool.AXE));
+            return;
+        }
+        if (lower.equals("sword") || lower.equals("#sword")) {
+            MinecraftClient client = MinecraftClient.getInstance();
+            client.execute(() -> craftRequestedTool(client, CraftTool.SWORD));
+            return;
+        }
         // open inventory
         if (lower.equals("open inventory") || lower.equals("open") || lower.equals("inventory") || lower.equals("#openinv")) {
             MinecraftClient client = MinecraftClient.getInstance();
@@ -450,6 +503,9 @@ public final class LiveControlClient implements ClientModInitializer {
         eatingTicks = 0;
         pendingSleepBedPos = null;
         sleepPathStarted = false;
+        pendingCraftingTablePos = null;
+        craftPathStarted = false;
+        craftModeActive = false;
 
         lastLiveChatCommandTime = now;
         executeLiveChatCommand(client, command, true);
@@ -485,6 +541,9 @@ public final class LiveControlClient implements ClientModInitializer {
         }
 
         if (command == LiveControlCommands.CLOSE) {
+            pendingCraftingTablePos = null;
+            craftPathStarted = false;
+            craftModeActive = false;
             // Close the current open screen (inventory, chest, chat, etc.) instead of sending a chat fallback.
             if (client.currentScreen != null) {
                 client.setScreen(null);
@@ -492,6 +551,11 @@ public final class LiveControlClient implements ClientModInitializer {
                     client.player.sendMessage(Text.literal("LiveControl closed the current screen."), true);
                 }
             }
+            return;
+        }
+
+        if (command == LiveControlCommands.CRAFT) {
+            startCraftingTableAutomation(client);
             return;
         }
 
@@ -536,7 +600,7 @@ public final class LiveControlClient implements ClientModInitializer {
                             if (mc != null && mc.getNetworkHandler() != null) {
                                 mc.getNetworkHandler().sendChatMessage("#set renderPath false");
                                 mc.getNetworkHandler().sendChatMessage("#set renderGoal false");
-                                mc.getNetworkHandler().sendChatMessage("#blocksToAvoidBreaking crafting_table,furnace,chest,trapped_chest,oak_planks,oak_fence,oak_fence_gate,glass");
+                                mc.getNetworkHandler().sendChatMessage("#blocksToDisallowBreaking crafting_table,furnace,chest,trapped_chest,oak_planks,oak_fence,oak_fence_gate,glass,spruce_planks,stone_bricks,yellow_bed");
                             }
                         }
                         context.getSource().sendFeedback(Text.literal(
@@ -558,16 +622,22 @@ public final class LiveControlClient implements ClientModInitializer {
                         String id = UUID.randomUUID().toString();
                         String name = "SafeZone " + (currentConfig.safeZones.size() + 1);
                         Vec3d pos = player.getPos();
-                        currentConfig.safeZones.add(new LiveControlConfig.SafeZone(
+                        LiveControlConfig.SafeZone safeZone = new LiveControlConfig.SafeZone(
                                 id,
                                 name,
                                 worldId(player),
                                 pos.x,
                                 pos.y,
                                 pos.z
-                        ));
+                        );
+                        currentConfig.safeZones.add(safeZone);
+                        int mergedCount = mergeCollidingSafeZones(currentConfig, safeZone);
                         saveConfig(currentConfig);
-                        context.getSource().sendFeedback(Text.literal("LiveControl saved " + name + " within 20 blocks."));
+                        if (mergedCount > 1) {
+                            context.getSource().sendFeedback(Text.literal("LiveControl merged " + mergedCount + " safezones into " + safeZoneName(safeZone) + "."));
+                        } else {
+                            context.getSource().sendFeedback(Text.literal("LiveControl saved " + name + " within 20 blocks."));
+                        }
                         return Command.SINGLE_SUCCESS;
                     })
                     .then(ClientCommandManager.literal("delete")
@@ -637,6 +707,9 @@ public final class LiveControlClient implements ClientModInitializer {
         pendingHomeAfterNetherPortal = false;
         pendingSleepBedPos = null;
         sleepPathStarted = false;
+        pendingCraftingTablePos = null;
+        craftPathStarted = false;
+        craftModeActive = false;
         safeZoneEscapeMemoryTicks = 0;
         // stop any automated attack/mob state and pickaxe automation; clear movement keys so the player regains control
         MinecraftClient client = MinecraftClient.getInstance();
@@ -826,6 +899,106 @@ public final class LiveControlClient implements ClientModInitializer {
         tickSleepAutomation(client);
     }
 
+    private static void startCraftingTableAutomation(MinecraftClient client) {
+        if (client.player == null || client.world == null || client.getNetworkHandler() == null || client.interactionManager == null) {
+            return;
+        }
+
+        BlockPos tablePos = nearestCraftingTable(client, client.player, CRAFTING_TABLE_SEARCH_RADIUS);
+        if (tablePos == null) {
+            client.player.sendMessage(Text.literal("LiveControl could not find a nearby crafting table."), true);
+            return;
+        }
+
+        craftModeActive = true;
+        pendingCraftingTablePos = tablePos.toImmutable();
+        craftPathStarted = false;
+        tickCraftingTableAutomation(client);
+    }
+
+    private static void tickCraftingTableAutomation(MinecraftClient client) {
+        if (pendingCraftingTablePos == null) {
+            return;
+        }
+        if (client == null || client.player == null || client.world == null || client.interactionManager == null || client.getNetworkHandler() == null) {
+            pendingCraftingTablePos = null;
+            craftPathStarted = false;
+            craftModeActive = false;
+            return;
+        }
+        if (!chatCommandsEnabled || !client.world.getBlockState(pendingCraftingTablePos).isOf(Blocks.CRAFTING_TABLE)) {
+            pendingCraftingTablePos = null;
+            craftPathStarted = false;
+            craftModeActive = false;
+            return;
+        }
+        if (client.player.currentScreenHandler instanceof CraftingScreenHandler) {
+            pendingCraftingTablePos = null;
+            craftPathStarted = false;
+            client.player.sendMessage(Text.literal("LiveControl ready to craft. Type Pickaxe, Axe, or Sword."), true);
+            return;
+        }
+
+        if (client.player.getPos().squaredDistanceTo(Vec3d.ofCenter(pendingCraftingTablePos)) > CRAFTING_TABLE_INTERACT_DISTANCE * CRAFTING_TABLE_INTERACT_DISTANCE) {
+            if (!craftPathStarted) {
+                sendMinecraftChatMessage(client, "#goto " + pendingCraftingTablePos.getX() + " " + pendingCraftingTablePos.getY() + " " + pendingCraftingTablePos.getZ());
+                client.player.sendMessage(Text.literal("LiveControl going to nearest crafting table."), true);
+                craftPathStarted = true;
+            }
+            return;
+        }
+
+        sendMinecraftChatMessage(client, "#stop");
+        stopMovement(client, client.player);
+        facePosition(client.player, Vec3d.ofCenter(pendingCraftingTablePos));
+        BlockHitResult hit = new BlockHitResult(Vec3d.ofCenter(pendingCraftingTablePos), Direction.UP, pendingCraftingTablePos, false);
+        client.interactionManager.interactBlock(client.player, Hand.MAIN_HAND, hit);
+        client.player.swingHand(Hand.MAIN_HAND);
+    }
+
+    private static BlockPos nearestCraftingTable(MinecraftClient client, ClientPlayerEntity player, int radius) {
+        BlockPos playerPos = player.getBlockPos();
+        BlockPos nearest = null;
+        double nearestSquaredDistance = Double.MAX_VALUE;
+        for (BlockPos pos : BlockPos.iterate(playerPos.add(-radius, -16, -radius), playerPos.add(radius, 16, radius))) {
+            if (!client.world.getBlockState(pos).isOf(Blocks.CRAFTING_TABLE)) {
+                continue;
+            }
+
+            double squaredDistance = playerPos.getSquaredDistance(pos);
+            if (squaredDistance < nearestSquaredDistance) {
+                nearest = pos.toImmutable();
+                nearestSquaredDistance = squaredDistance;
+            }
+        }
+        return nearest;
+    }
+
+    private static void craftRequestedTool(MinecraftClient client, CraftTool tool) {
+        if (client == null || client.player == null || client.world == null || client.getNetworkHandler() == null || client.interactionManager == null) {
+            return;
+        }
+        if (!craftModeActive && !(client.player.currentScreenHandler instanceof CraftingScreenHandler)) {
+            return;
+        }
+        if (!(client.player.currentScreenHandler instanceof CraftingScreenHandler handler)) {
+            if (openNearbyCraftingTable(client, client.player)) {
+                client.player.sendMessage(Text.literal("LiveControl opened the crafting table. Type " + tool.displayName + " again."), true);
+            } else {
+                client.player.sendMessage(Text.literal("Insufficient Resources!"), true);
+            }
+            return;
+        }
+
+        Item craftedItem = tryCraftTool(client, handler, tool);
+        if (craftedItem == null) {
+            client.player.sendMessage(Text.literal("Insufficient Resources!"), true);
+            return;
+        }
+
+        client.player.sendMessage(Text.literal("LiveControl crafted " + craftedItem.getName().getString() + "."), true);
+    }
+
     private static void tickSleepAutomation(MinecraftClient client) {
         if (pendingSleepBedPos == null) {
             return;
@@ -896,6 +1069,82 @@ public final class LiveControlClient implements ClientModInitializer {
 
     private static String safeZoneName(LiveControlConfig.SafeZone safeZone) {
         return safeZone.name == null || safeZone.name.isBlank() ? "safezone" : safeZone.name;
+    }
+
+    private static int mergeCollidingSafeZones(LiveControlConfig config, LiveControlConfig.SafeZone mergedZone) {
+        if (config.safeZones == null || mergedZone == null) {
+            return 1;
+        }
+
+        int mergedCount = 1;
+        boolean changed;
+        do {
+            changed = false;
+            for (int i = 0; i < config.safeZones.size(); i++) {
+                LiveControlConfig.SafeZone other = config.safeZones.get(i);
+                if (other == null || other == mergedZone || !sameSafeZoneWorld(mergedZone, other) || !safeZonesCollide(mergedZone, other)) {
+                    continue;
+                }
+
+                expandSafeZoneToContain(mergedZone, other);
+                config.safeZones.remove(i);
+                mergedCount++;
+                changed = true;
+                break;
+            }
+        } while (changed);
+
+        if (mergedCount > 1) {
+            mergedZone.name = "SafeZone " + config.safeZones.size();
+        }
+        return mergedCount;
+    }
+
+    private static boolean sameSafeZoneWorld(LiveControlConfig.SafeZone first, LiveControlConfig.SafeZone second) {
+        return first.world != null && first.world.equals(second.world);
+    }
+
+    private static boolean safeZonesCollide(LiveControlConfig.SafeZone first, LiveControlConfig.SafeZone second) {
+        double radius = safeZoneRadius(first) + safeZoneRadius(second);
+        return safeZoneDistanceSquared(first, second) <= radius * radius;
+    }
+
+    private static void expandSafeZoneToContain(LiveControlConfig.SafeZone target, LiveControlConfig.SafeZone other) {
+        double targetRadius = safeZoneRadius(target);
+        double otherRadius = safeZoneRadius(other);
+        double dx = other.x - target.x;
+        double dy = other.y - target.y;
+        double dz = other.z - target.z;
+        double distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
+
+        if (distance + otherRadius <= targetRadius) {
+            return;
+        }
+        if (distance + targetRadius <= otherRadius) {
+            target.x = other.x;
+            target.y = other.y;
+            target.z = other.z;
+            target.radius = otherRadius;
+            return;
+        }
+
+        double newRadius = (distance + targetRadius + otherRadius) / 2.0D;
+        double centerOffset = (newRadius - targetRadius) / distance;
+        target.x += dx * centerOffset;
+        target.y += dy * centerOffset;
+        target.z += dz * centerOffset;
+        target.radius = newRadius;
+    }
+
+    private static double safeZoneRadius(LiveControlConfig.SafeZone safeZone) {
+        return safeZone.radius > 0.0D ? safeZone.radius : SAFE_ZONE_RADIUS;
+    }
+
+    private static double safeZoneDistanceSquared(LiveControlConfig.SafeZone first, LiveControlConfig.SafeZone second) {
+        double dx = first.x - second.x;
+        double dy = first.y - second.y;
+        double dz = first.z - second.z;
+        return dx * dx + dy * dy + dz * dz;
     }
 
     private static LiveControlConfig.SafeZone nearestSafeZone(ClientPlayerEntity player, double maxDistance) {
@@ -981,56 +1230,32 @@ public final class LiveControlClient implements ClientModInitializer {
             safeZoneStopCooldownTicks--;
         }
         List<LiveControlConfig.SafeZone> activeSafeZones = containingSafeZones(player);
-        if (!activeSafeZones.isEmpty()) {
-            safeZoneEscapeMemoryTicks = SAFE_ZONE_ESCAPE_MEMORY_TICKS;
-        } else if (safeZoneEscapeMemoryTicks > 0) {
-            safeZoneEscapeMemoryTicks--;
-        }
-
-        List<LiveControlConfig.SafeZone> threatSafeZones = nearbySafeZones(player, SAFE_ZONE_CLEAR_MARGIN + SAFE_ZONE_ESCAPE_LOOKAHEAD_BLOCKS);
-        List<LiveControlConfig.SafeZone> messageSafeZones = activeSafeZones.isEmpty() ? threatSafeZones : activeSafeZones;
-
-        // If there are no relevant safezones and no escape target, nothing to do
-        if (messageSafeZones.isEmpty() && safeZoneEscapeTargetCenter == null) {
+        if (activeSafeZones.isEmpty()) {
+            if (safeZoneEscapeTargetCenter != null) {
+                stopMovement(client, player);
+            }
+            safeZoneEscapeTargetCenter = null;
+            safeZoneEscapeTargetClearRadius = 0.0D;
+            safeZoneEscapeMemoryTicks = 0;
             return false;
         }
 
-        // If starting a new escape, record the cluster center and a clear radius to avoid re-entering
-        if (safeZoneEscapeTargetCenter == null && !messageSafeZones.isEmpty()) {
-            safeZoneEscapeTargetCenter = safeZoneClusterCenter(messageSafeZones);
-            double maxRadius = messageSafeZones.stream()
-                    .mapToDouble(sz -> sz.radius > 0.0D ? sz.radius : SAFE_ZONE_RADIUS)
-                    .max().orElse(SAFE_ZONE_RADIUS);
-            safeZoneEscapeTargetClearRadius = maxRadius + SAFE_ZONE_CLEAR_MARGIN;
-        }
-
-        // If we have an escape target, check whether we've cleared it; if so, stop escaping
-        if (safeZoneEscapeTargetCenter != null) {
-            double clearedDistanceSq = safeZoneEscapeTargetClearRadius * safeZoneEscapeTargetClearRadius;
-            if (player.getPos().squaredDistanceTo(safeZoneEscapeTargetCenter) > clearedDistanceSq) {
-                // cleared the cluster: reset escape state
-                safeZoneEscapeTargetCenter = null;
-                safeZoneEscapeTargetClearRadius = 0.0D;
-                safeZoneEscapeMemoryTicks = 0;
-                return false;
-            }
-        }
-
         // Still escaping: cancel actions and steer away
+        safeZoneEscapeTargetCenter = safeZoneClusterCenter(activeSafeZones);
         cancelQueuedLiveChatCommands();
         attackTarget = null;
         attackBlockedTicks = 0;
         runningFromMobs = false;
         if (safeZoneStopCooldownTicks <= 0) {
             sendMinecraftChatMessage(client, "#stop");
-            String zoneText = messageSafeZones.size() == 1
-                    ? safeZoneName(messageSafeZones.get(0))
-                    : messageSafeZones.size() + " nearby safezones";
+            String zoneText = activeSafeZones.size() == 1
+                    ? safeZoneName(activeSafeZones.get(0))
+                    : activeSafeZones.size() + " safezones";
             player.sendMessage(Text.literal("LiveControl avoiding " + zoneText + "."), true);
             safeZoneStopCooldownTicks = SAFE_ZONE_STOP_COOLDOWN_TICKS;
         }
 
-        runAwayFromSafeZones(client, player, messageSafeZones);
+        runAwayFromSafeZones(client, player, activeSafeZones);
         return true;
     }
 
@@ -1246,33 +1471,14 @@ public final class LiveControlClient implements ClientModInitializer {
     }
 
     private static void runAwayFromSafeZones(MinecraftClient client, ClientPlayerEntity player, List<LiveControlConfig.SafeZone> safeZones) {
-        Vec3d away;
-        // If called with an empty safeZones list but an escape cluster has been recorded, use that center
-        if ((safeZones == null || safeZones.isEmpty()) && safeZoneEscapeTargetCenter != null) {
-            away = player.getPos().subtract(safeZoneEscapeTargetCenter);
-        } else {
-            away = player.getPos().subtract(safeZoneClusterCenter(safeZones));
-        }
-
+        Vec3d away = player.getPos().subtract(safeZoneClusterCenter(safeZones));
         if (away.horizontalLengthSquared() < 1.0E-6D) {
             away = player.getRotationVector();
         }
 
-        // Prefer running opposite the player's most recent movement when starting to escape
-        Vec3d preferred = away;
-        if (previousPlayerPos != null) {
-            Vec3d lastMovement = player.getPos().subtract(previousPlayerPos);
-            if (lastMovement.horizontalLengthSquared() >= 1.0E-6D) {
-                preferred = lastMovement.multiply(-1.0D);
-            }
-        }
-
-        // Use the preferred vector unless it's effectively zero, otherwise fall back to the away vector
-        Vec3d escape = preferred.horizontalLengthSquared() >= 1.0E-6D ? preferred : away;
-
-        setYawFromVector(player, escape);
+        setYawFromVector(player, away);
         moveForward(client, player, true);
-        client.options.sneakKey.setPressed(escapeDescentDrop(client, player, escape) > 0);
+        client.options.sneakKey.setPressed(false);
         Vec3d forward = Vec3d.fromPolar(0.0F, player.getYaw()).normalize().multiply(canSprintSafely(player) ? 0.14D : 0.09D);
         Vec3d velocity = player.getVelocity();
         player.setVelocity(forward.x, velocity.y, forward.z);
@@ -1577,6 +1783,23 @@ public final class LiveControlClient implements ClientModInitializer {
 
     private static boolean tryCraftItem(MinecraftClient client, ScreenHandler handler, Item item) {
         return tryCraftRecipe(client, handler, recipe -> recipe.getOutput(client.world.getRegistryManager()).isOf(item));
+    }
+
+    private static Item tryCraftTool(MinecraftClient client, CraftingScreenHandler handler, CraftTool tool) {
+        for (Item output : tool.outputs) {
+            if (tryCraftItemAndVerify(client, handler, output)) {
+                return output;
+            }
+        }
+        return null;
+    }
+
+    private static boolean tryCraftItemAndVerify(MinecraftClient client, ScreenHandler handler, Item item) {
+        int previousCount = countItem(client.player, item);
+        if (!tryCraftItem(client, handler, item)) {
+            return false;
+        }
+        return countItem(client.player, item) > previousCount;
     }
 
     private static boolean tryCraftTaggedOutput(MinecraftClient client, ScreenHandler handler, net.minecraft.registry.tag.TagKey<Item> tag) {

@@ -18,6 +18,7 @@ public enum LiveControlCommands {
     HOME("Home", "#home", "home", "#home"),
     LOOT("Loot", "#pickup", "loot", "#loot", "pickup", "#pickup"),
     EXPLORE("Explore", "#explore", "explore", "#explore"),
+    CRAFT("Craft", new String[0], "craft", "#craft"),
     CLOSE("Close", "#close", "close", "#close"),
     SLEEP("Sleep", new String[0], "sleep", "#sleep"),
     STOP("Stop", "#stop", "stop", "#stop");
