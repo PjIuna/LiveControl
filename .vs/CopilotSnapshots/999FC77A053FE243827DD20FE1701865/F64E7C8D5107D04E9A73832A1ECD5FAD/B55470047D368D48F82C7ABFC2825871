@@ -1,4 +1,4 @@
-package com.livecontrol.client;
+﻿package com.livecontrol.client;
 
 import com.mojang.brigadier.Command;
 import net.fabricmc.api.ClientModInitializer;
@@ -572,12 +572,9 @@ public final class LiveControlClient implements ClientModInitializer {
                     .filter(m -> !"#stop".equalsIgnoreCase(m.trim()))
                     .toArray(String[]::new);
         }
-        String feedback = command.triggerHint();
-        if (feedback == null || feedback.isBlank()) {
-            feedback = command.displayName();
-        }
+        String feedback = command.displayName();
         if (commandMessages.length > 1) {
-            feedback = feedback + " sequence (" + commandMessages.length + " commands)";
+            feedback = command.displayName() + " sequence (" + commandMessages.length + " commands)";
         }
         client.player.sendMessage(Text.literal("LiveControl ran " + feedback), true);
     }
@@ -850,7 +847,9 @@ public final class LiveControlClient implements ClientModInitializer {
     }
 
     private static boolean isCommandAvailableInCurrentDimension(LiveControlCommands command, ClientPlayerEntity player) {
-        // No dimension-specific restrictions at the moment.
+        if (command == LiveControlCommands.GOLD && !isInNether(player)) {
+            return false;
+        }
         return true;
     }
 

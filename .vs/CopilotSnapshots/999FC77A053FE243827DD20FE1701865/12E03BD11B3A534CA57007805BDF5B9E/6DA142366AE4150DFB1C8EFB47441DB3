@@ -1,4 +1,4 @@
-package com.livecontrol.client;
+﻿package com.livecontrol.client;
 
 import com.mojang.brigadier.Command;
 import net.fabricmc.api.ClientModInitializer;
@@ -850,7 +850,9 @@ public final class LiveControlClient implements ClientModInitializer {
     }
 
     private static boolean isCommandAvailableInCurrentDimension(LiveControlCommands command, ClientPlayerEntity player) {
-        // No dimension-specific restrictions at the moment.
+        if (command == LiveControlCommands.GOLD && !isInNether(player)) {
+            return false;
+        }
         return true;
     }
 

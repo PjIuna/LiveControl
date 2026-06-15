@@ -1,4 +1,4 @@
-package com.livecontrol.client;
+﻿package com.livecontrol.client;
 
 import java.util.Arrays;
 import java.util.Locale;
@@ -7,15 +7,15 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 public enum LiveControlCommands {
-    STONE("Mine", "#mine minecraft:diamond_ore minecraft:iron_ore minecraft:deepslate_diamond_ore minecraft:deepslate_iron_ore", "mine", "#mine", "#stone", "#mine stone"),
+    STONE("Mine", "#mine stone", "mine", "#mine", "stone", "#stone", "#mine stone"),
     WOOD("Wood", "#mine oak_log", "wood", "#wood", "#mine wood", "#mine oak_log"),
     FARM("Farm", "#farm", "farm", "#farm"),
-    NETHER("Nether", "#goto minecraft:nether_portal", "nether", "#nether"),
+    NETHER("Nether", "#goto minecraft:nether_portal", "nether", "#nether", "go nether", "goto nether"),
     JUMP("Jump", "#jump", "jump", "#jump"),
-    OPEN_INVENTORY("Open Inventory", "#openinv", "open inventory", "#open inventory"),
+    OPEN_INVENTORY("Open Inventory", "#openinv", "open inventory", "open", "inventory", "#open inventory"),
     BREAK("Break", new String[0], "break"),
     HOME("Home", "#home", "home", "#home"),
-    LOOT("Loot", "#pickup", "loot", "#loot", "#pickup"),
+    LOOT("Loot", "#pickup", "loot", "#loot", "pickup", "#pickup"),
     EXPLORE("Explore", "#explore", "explore", "#explore"),
     CRAFT("Craft", new String[0], "craft", "#craft"),
     CLOSE("Close", "#close", "close", "#close"),
@@ -48,15 +48,6 @@ public enum LiveControlCommands {
 
     public String[] chatCommands() {
         return Arrays.copyOf(chatCommands, chatCommands.length);
-    }
-
-    public String triggerHint() {
-        return Arrays.stream(liveChatTriggers)
-                .filter(s -> s != null && !s.contains("#"))
-                .map(LiveControlCommands::normalize)
-                .filter(s -> !s.isBlank())
-                .distinct()
-                .collect(Collectors.joining(", "));
     }
 
     public static Optional<LiveControlCommands> fromChatMessage(String message) {

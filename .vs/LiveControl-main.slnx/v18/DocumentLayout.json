@@ -3,12 +3,16 @@
   "WorkspaceRootPath": "C:\\Users\\dkp1s\\Downloads\\LiveControl-main\\LiveControl-main\\",
   "Documents": [
     {
-      "AbsoluteMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|C:\\Users\\dkp1s\\Downloads\\LiveControl-main\\LiveControl-main\\src\\main\\java\\com\\livecontrol\\client\\LiveControlCommands.java||{3B902123-F8A7-4915-9F01-361F908088D0}",
-      "RelativeMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|solutionrelative:src\\main\\java\\com\\livecontrol\\client\\LiveControlCommands.java||{3B902123-F8A7-4915-9F01-361F908088D0}"
+      "AbsoluteMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|C:\\Users\\dkp1s\\Downloads\\LiveControl-main\\LiveControl-main\\src\\main\\java\\com\\livecontrol\\client\\TwitchChatBridge.java||{3B902123-F8A7-4915-9F01-361F908088D0}",
+      "RelativeMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|solutionrelative:src\\main\\java\\com\\livecontrol\\client\\TwitchChatBridge.java||{3B902123-F8A7-4915-9F01-361F908088D0}"
     },
     {
       "AbsoluteMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|C:\\Users\\dkp1s\\Downloads\\LiveControl-main\\LiveControl-main\\src\\main\\java\\com\\livecontrol\\client\\LiveControlClient.java||{3B902123-F8A7-4915-9F01-361F908088D0}",
       "RelativeMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|solutionrelative:src\\main\\java\\com\\livecontrol\\client\\LiveControlClient.java||{3B902123-F8A7-4915-9F01-361F908088D0}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|C:\\Users\\dkp1s\\Downloads\\LiveControl-main\\LiveControl-main\\src\\main\\java\\com\\livecontrol\\client\\LiveControlCommands.java||{3B902123-F8A7-4915-9F01-361F908088D0}",
+      "RelativeMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|solutionrelative:src\\main\\java\\com\\livecontrol\\client\\LiveControlCommands.java||{3B902123-F8A7-4915-9F01-361F908088D0}"
     },
     {
       "AbsoluteMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|C:\\Users\\dkp1s\\Downloads\\LiveControl-main\\LiveControl-main\\src\\main\\resources\\fabric.mod.json||{90A6B3A7-C1A3-4009-A288-E2FF89E96FA0}",
@@ -23,10 +27,6 @@
       "RelativeMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|solutionrelative:build.gradle||{8B382828-6202-11D1-8870-0000F87579D2}"
     },
     {
-      "AbsoluteMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|C:\\Users\\dkp1s\\Downloads\\LiveControl-main\\LiveControl-main\\src\\main\\java\\com\\livecontrol\\client\\TwitchChatBridge.java||{3B902123-F8A7-4915-9F01-361F908088D0}",
-      "RelativeMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|solutionrelative:src\\main\\java\\com\\livecontrol\\client\\TwitchChatBridge.java||{3B902123-F8A7-4915-9F01-361F908088D0}"
-    },
-    {
       "AbsoluteMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|C:\\Users\\dkp1s\\Downloads\\LiveControl-main\\LiveControl-main\\src\\main\\java\\com\\livecontrol\\client\\YoutubeChatBridge.java||{3B902123-F8A7-4915-9F01-361F908088D0}",
       "RelativeMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|solutionrelative:src\\main\\java\\com\\livecontrol\\client\\YoutubeChatBridge.java||{3B902123-F8A7-4915-9F01-361F908088D0}"
     }
@@ -38,7 +38,7 @@
       "DocumentGroups": [
         {
           "DockedWidth": 200,
-          "SelectedChildIndex": 3,
+          "SelectedChildIndex": 2,
           "Children": [
             {
               "$type": "Bookmark",
@@ -58,32 +58,33 @@
             },
             {
               "$type": "Document",
-              "DocumentIndex": 5,
+              "DocumentIndex": 0,
               "Title": "TwitchChatBridge.java",
               "DocumentMoniker": "C:\\Users\\dkp1s\\Downloads\\LiveControl-main\\LiveControl-main\\src\\main\\java\\com\\livecontrol\\client\\TwitchChatBridge.java",
               "RelativeDocumentMoniker": "src\\main\\java\\com\\livecontrol\\client\\TwitchChatBridge.java",
               "ToolTip": "C:\\Users\\dkp1s\\Downloads\\LiveControl-main\\LiveControl-main\\src\\main\\java\\com\\livecontrol\\client\\TwitchChatBridge.java",
               "RelativeToolTip": "src\\main\\java\\com\\livecontrol\\client\\TwitchChatBridge.java",
-              "ViewState": "AgIAAAAAAAAAAAAAAAAxwH8AAAAAAAAAAAAAAA==",
+              "ViewState": "AgIAAAEAAAAAAAAAAAAAAH0AAAAAAAAAAAAAAA==",
               "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.001001|",
-              "WhenOpened": "2026-05-08T02:53:43.614Z"
+              "WhenOpened": "2026-05-08T02:53:43.614Z",
+              "EditorCaption": ""
             },
             {
               "$type": "Document",
-              "DocumentIndex": 0,
+              "DocumentIndex": 2,
               "Title": "LiveControlCommands.java",
               "DocumentMoniker": "C:\\Users\\dkp1s\\Downloads\\LiveControl-main\\LiveControl-main\\src\\main\\java\\com\\livecontrol\\client\\LiveControlCommands.java",
               "RelativeDocumentMoniker": "src\\main\\java\\com\\livecontrol\\client\\LiveControlCommands.java",
               "ToolTip": "C:\\Users\\dkp1s\\Downloads\\LiveControl-main\\LiveControl-main\\src\\main\\java\\com\\livecontrol\\client\\LiveControlCommands.java",
               "RelativeToolTip": "src\\main\\java\\com\\livecontrol\\client\\LiveControlCommands.java",
-              "ViewState": "AgIAAAAAAAAAAAAAAAAAABQAAAAwAAAAAAAAAA==",
+              "ViewState": "AgIAAAAAAAAAAAAAAAAAAAIAAAAXAAAAAAAAAA==",
               "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.001001|",
               "WhenOpened": "2026-05-08T02:51:50.343Z",
               "EditorCaption": ""
             },
             {
               "$type": "Document",
-              "DocumentIndex": 3,
+              "DocumentIndex": 4,
               "Title": "gradle.properties",
               "DocumentMoniker": "C:\\Users\\dkp1s\\Downloads\\LiveControl-main\\LiveControl-main\\gradle.properties",
               "RelativeDocumentMoniker": "gradle.properties",
@@ -95,7 +96,7 @@
             },
             {
               "$type": "Document",
-              "DocumentIndex": 2,
+              "DocumentIndex": 3,
               "Title": "fabric.mod.json",
               "DocumentMoniker": "C:\\Users\\dkp1s\\Downloads\\LiveControl-main\\LiveControl-main\\src\\main\\resources\\fabric.mod.json",
               "RelativeDocumentMoniker": "src\\main\\resources\\fabric.mod.json",
@@ -113,14 +114,14 @@
               "RelativeDocumentMoniker": "src\\main\\java\\com\\livecontrol\\client\\LiveControlClient.java",
               "ToolTip": "C:\\Users\\dkp1s\\Downloads\\LiveControl-main\\LiveControl-main\\src\\main\\java\\com\\livecontrol\\client\\LiveControlClient.java",
               "RelativeToolTip": "src\\main\\java\\com\\livecontrol\\client\\LiveControlClient.java",
-              "ViewState": "AgIAAHUAAAAAAAAAAABBwCAHAAAAAAAAAAAAAA==",
+              "ViewState": "AgIAAJgDAAAAAAAAAAAUwKwDAABrAAAAAAAAAA==",
               "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.001001|",
               "WhenOpened": "2026-05-07T23:10:38.726Z",
               "EditorCaption": ""
             },
             {
               "$type": "Document",
-              "DocumentIndex": 4,
+              "DocumentIndex": 5,
               "Title": "build.gradle",
               "DocumentMoniker": "C:\\Users\\dkp1s\\Downloads\\LiveControl-main\\LiveControl-main\\build.gradle",
               "RelativeDocumentMoniker": "build.gradle",

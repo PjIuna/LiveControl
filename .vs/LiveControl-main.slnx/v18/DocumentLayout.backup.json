@@ -38,15 +38,11 @@
       "DocumentGroups": [
         {
           "DockedWidth": 200,
-          "SelectedChildIndex": 4,
+          "SelectedChildIndex": 3,
           "Children": [
             {
               "$type": "Bookmark",
               "Name": "ST:0:0:{aa2115a1-9712-457b-9047-dbb71ca2cdd2}"
-            },
-            {
-              "$type": "Bookmark",
-              "Name": "ST:0:0:{1c4feeaa-4718-4aa9-859d-94ce25d182ba}"
             },
             {
               "$type": "Document",
@@ -58,8 +54,7 @@
               "RelativeToolTip": "src\\main\\java\\com\\livecontrol\\client\\YoutubeChatBridge.java",
               "ViewState": "AgIAAAAAAAAAAAAAAAAxwJUAAAAAAAAAAAAAAA==",
               "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.001001|",
-              "WhenOpened": "2026-05-08T02:53:48.803Z",
-              "EditorCaption": ""
+              "WhenOpened": "2026-05-08T02:53:48.803Z"
             },
             {
               "$type": "Document",
@@ -71,8 +66,7 @@
               "RelativeToolTip": "src\\main\\java\\com\\livecontrol\\client\\TwitchChatBridge.java",
               "ViewState": "AgIAAAAAAAAAAAAAAAAxwH8AAAAAAAAAAAAAAA==",
               "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.001001|",
-              "WhenOpened": "2026-05-08T02:53:43.614Z",
-              "EditorCaption": ""
+              "WhenOpened": "2026-05-08T02:53:43.614Z"
             },
             {
               "$type": "Document",
@@ -82,7 +76,7 @@
               "RelativeDocumentMoniker": "src\\main\\java\\com\\livecontrol\\client\\LiveControlCommands.java",
               "ToolTip": "C:\\Users\\dkp1s\\Downloads\\LiveControl-main\\LiveControl-main\\src\\main\\java\\com\\livecontrol\\client\\LiveControlCommands.java",
               "RelativeToolTip": "src\\main\\java\\com\\livecontrol\\client\\LiveControlCommands.java",
-              "ViewState": "AgIAAAAAAAAAAAAAAAAAABQAAAA1AAAAAAAAAA==",
+              "ViewState": "AgIAAAAAAAAAAAAAAAAAAAwAAAArAAAAAAAAAA==",
               "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.001001|",
               "WhenOpened": "2026-05-08T02:51:50.343Z",
               "EditorCaption": ""
@@ -97,8 +91,7 @@
               "RelativeToolTip": "gradle.properties",
               "ViewState": "AgIAAAUAAAAAAAAAAIBJwAAAAAAAAAAAAAAAAA==",
               "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.001001|",
-              "WhenOpened": "2026-05-07T23:56:22.019Z",
-              "EditorCaption": ""
+              "WhenOpened": "2026-05-07T23:56:22.019Z"
             },
             {
               "$type": "Document",
@@ -110,8 +103,7 @@
               "RelativeToolTip": "src\\main\\resources\\fabric.mod.json",
               "ViewState": "AgIAABQAAAAAAAAAAEBVwAAAAAAAAAAAAAAAAA==",
               "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.001642|",
-              "WhenOpened": "2026-05-07T23:56:16.338Z",
-              "EditorCaption": ""
+              "WhenOpened": "2026-05-07T23:56:16.338Z"
             },
             {
               "$type": "Document",
@@ -121,7 +113,7 @@
               "RelativeDocumentMoniker": "src\\main\\java\\com\\livecontrol\\client\\LiveControlClient.java",
               "ToolTip": "C:\\Users\\dkp1s\\Downloads\\LiveControl-main\\LiveControl-main\\src\\main\\java\\com\\livecontrol\\client\\LiveControlClient.java",
               "RelativeToolTip": "src\\main\\java\\com\\livecontrol\\client\\LiveControlClient.java",
-              "ViewState": "AgIAAMUAAAAAAAAAAAAUwOUAAAAeAAAAAAAAAA==",
+              "ViewState": "AgIAAHcAAAAAAAAAAAAAACAHAAAAAAAAAAAAAA==",
               "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.001001|",
               "WhenOpened": "2026-05-07T23:10:38.726Z",
               "EditorCaption": ""
@@ -136,8 +128,7 @@
               "RelativeToolTip": "build.gradle",
               "ViewState": "AgIAACEAAAAAAAAAAIBJwAAAAAAAAAAAAAAAAA==",
               "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.001001|",
-              "WhenOpened": "2026-05-07T23:56:43.693Z",
-              "EditorCaption": ""
+              "WhenOpened": "2026-05-07T23:56:43.693Z"
             }
           ]
         }
